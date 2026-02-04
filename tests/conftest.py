@@ -22,7 +22,7 @@ def tmp_blah_home(tmp_path: Path) -> Path:
         "models:\n"
         "  conversation:\n"
         "    provider: anthropic\n"
-        "    model: claude-sonnet-4-20250514\n"
+        "    model: claude-sonnet-4-5-20250514\n"
         "context:\n"
         "  path: context.md\n"
         "  max_tokens: 2000\n"

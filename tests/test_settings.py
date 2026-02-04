@@ -25,8 +25,8 @@ def test_paths(tmp_blah_home: Path):
 def test_defaults():
     """Settings should work with all defaults when no config file exists."""
     settings = BlahSettings(blah_home=Path("/tmp/test-blah-nonexistent"))
-    assert settings.models.triage.model == "claude-3-haiku-20240307"
-    assert settings.models.conversation.model == "claude-sonnet-4-20250514"
+    assert settings.models.triage.model == "claude-haiku-4-5-20250414"
+    assert settings.models.conversation.model == "claude-sonnet-4-5-20250514"
     assert settings.context.path == "context.md"
 
 

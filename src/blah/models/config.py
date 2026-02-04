@@ -26,15 +26,15 @@ class TwitterConfig(PlatformConfig):
 
 class ModelTierConfig(BaseModel):
     provider: str = "anthropic"
-    model: str = "claude-sonnet-4-20250514"
+    model: str = "claude-sonnet-4-5-20250514"
 
 
 class ModelsYamlConfig(BaseModel):
     triage: ModelTierConfig = Field(
-        default_factory=lambda: ModelTierConfig(model="claude-3-haiku-20240307")
+        default_factory=lambda: ModelTierConfig(model="claude-haiku-4-5-20250414")
     )
     research: ModelTierConfig = Field(
-        default_factory=lambda: ModelTierConfig(model="claude-3-haiku-20240307")
+        default_factory=lambda: ModelTierConfig(model="claude-haiku-4-5-20250414")
     )
     conversation: ModelTierConfig = Field(default_factory=ModelTierConfig)
 
