@@ -1,421 +1,184 @@
-# Plan: Blah MVP Technical Implementation
+# Blah MVP Build Plan
 
-## Overview
+5 phases. Each phase = a PR to GitHub. Wait for review before starting next phase.
 
-Implement the Blah MVP as a Python CLI tool using uv for package management, with comprehensive testing and observability from day one.
+## Workflow
+- Each phase is implemented on a feature branch and submitted as a PR
+- Wait for feedback/approval before proceeding to the next phase
+- DEFERRED.md explicitly tracks deferred features
 
-## Project Structure
+## Key Simplifications
 
+- **5 phases instead of 7** — compressed foundation, user value from Phase 2
+- **Synchronous throughout** — no async, no task queue (deferred post-MVP)
+- **No LLM abstraction layer** — Anthropic directly, extract abstraction when second provider is needed
+- **`input()` + Rich for chat** — no prompt_toolkit (add later for polish)
+- **`db/` not `adapters/db/`** — SQLite is the persistence layer, not a swappable adapter
+- **`llm/` not `adapters/llm/`** — single provider, no abstraction
+- **Observability deferred to Phase 5** — structlog + metrics after system is stable
+- **Research Agent simplified** — single-pass triage in Phase 4, not full generator-critic
+- **Keep `uv_build`** — matches pyproject.toml
+- **Platform order: Bluesky → Twitter** — Mastodon deferred
+- **Alembic for schema migrations** — not raw SQL scripts
+- **Models: Claude 4.5 variants** — sonnet-4-5 for conversation, haiku-4-5 for triage/research
+
+## Completed Phases
+
+### Phase 1: Skeleton + Persistence + Init ✓
+
+Merged. CLI skeleton, Alembic migrations, config loading, repository CRUD, 21 tests.
+
+---
+
+## Phase 2: Agent Framework + Rant Agent
+
+**Goal**: `blah rant create` starts a real chat loop with Claude. Agent uses tools to create rants with pieces. `blah rant list` and `blah rant show <id>` work.
+
+**Branch**: `phase-2-rant-agent`
+**Dependencies to add**: anthropic
+
+**Files to create**:
 ```
-blah/
-├── src/
-│   └── blah/
-│       ├── __init__.py
-│       ├── __main__.py              # python -m blah
-│       ├── py.typed                 # PEP 561 type marker
-│       │
-│       ├── cli/                     # CLI Layer
-│       │   ├── __init__.py
-│       │   ├── main.py              # Click entry point
-│       │   └── commands/
-│       │       ├── __init__.py
-│       │       ├── rant.py
-│       │       ├── radar.py
-│       │       ├── config.py
-│       │       ├── context.py
-│       │       └── stats.py
-│       │
-│       ├── agents/                  # Agent Layer
-│       │   ├── __init__.py
-│       │   ├── base.py              # Base agent class
-│       │   ├── rant.py
-│       │   ├── radar_config.py
-│       │   ├── radar_report.py
-│       │   ├── context_manager.py
-│       │   ├── research.py          # Non-interactive
-│       │   └── tools/
-│       │       ├── __init__.py
-│       │       ├── base.py          # @logged_tool decorator
-│       │       ├── rant_tools.py
-│       │       ├── radar_tools.py
-│       │       └── context_tools.py
-│       │
-│       ├── services/                # Business Logic
-│       │   ├── __init__.py
-│       │   ├── publishing.py
-│       │   └── pipeline.py          # poll → triage → research → report
-│       │
-│       ├── adapters/                # External Integrations
-│       │   ├── __init__.py
-│       │   ├── llm/
-│       │   │   ├── __init__.py
-│       │   │   ├── base.py          # LLM client protocol
-│       │   │   ├── anthropic.py
-│       │   │   └── openai.py
-│       │   ├── platforms/
-│       │   │   ├── __init__.py
-│       │   │   ├── base.py          # PlatformAdapter ABC
-│       │   │   ├── bluesky.py
-│       │   │   ├── mastodon.py
-│       │   │   └── twitter.py
-│       │   └── db/
-│       │       ├── __init__.py
-│       │       ├── connection.py
-│       │       ├── schema.sql
-│       │       └── repository.py
-│       │
-│       ├── models/                  # Domain Models (Pydantic)
-│       │   ├── __init__.py
-│       │   ├── rant.py
-│       │   ├── piece.py
-│       │   ├── source.py
-│       │   ├── feed_item.py
-│       │   ├── report.py
-│       │   └── config.py
-│       │
-│       ├── observability/           # Logging & Metrics
-│       │   ├── __init__.py
-│       │   ├── logging_setup.py     # structlog config
-│       │   ├── context.py           # log context binding
-│       │   ├── tracing.py           # correlation IDs
-│       │   ├── llm_metrics.py       # token/cost tracking
-│       │   ├── metrics_store.py     # SQLite queries
-│       │   └── errors.py            # error categorization
-│       │
-│       └── config/
-│           ├── __init__.py
-│           └── settings.py          # Pydantic settings
-│
-├── tests/
-│   ├── conftest.py                  # Global fixtures
-│   ├── factories.py                 # Test data factories
-│   ├── mocks/
-│   │   ├── __init__.py
-│   │   ├── llm.py                   # MockLLMClient
-│   │   └── adapters.py              # MockPlatformAdapter
-│   ├── fixtures/
-│   │   ├── context_samples/
-│   │   └── llm_responses/
-│   ├── unit/
-│   │   ├── agents/
-│   │   ├── adapters/
-│   │   └── services/
-│   └── integration/
-│       ├── test_agent_loops.py
-│       └── test_cli_commands.py
-│
-├── pyproject.toml
-├── uv.lock
-├── .python-version
-└── README.md
+src/blah/agents/__init__.py
+src/blah/agents/base.py           # BaseAgent — THE critical file
+src/blah/agents/rant.py           # RantAgent: system prompt, tool registration
+src/blah/agents/tools/__init__.py
+src/blah/agents/tools/base.py     # @tool decorator, ToolResult type, tool registry
+src/blah/agents/tools/rant_tools.py    # set_title, set_summary, create_piece, update_piece, finalize_rant, attach_resource
+src/blah/agents/tools/context_tools.py # suggest_context_update (simple: append to context.md)
+src/blah/cli/chat.py              # Shared chat loop: input() + Rich console
+src/blah/llm/__init__.py
+src/blah/llm/client.py            # Thin Anthropic SDK wrapper
+tests/mocks/llm.py                # MockLLMClient with scripted responses
+tests/test_agent_base.py
+tests/test_rant_agent.py
+tests/test_rant_cli.py
 ```
 
-## pyproject.toml
+**Update**: `cli/commands/rant.py` (implement create/list/show/chat), `db/repository.py` (complete CRUD)
 
-```toml
-[project]
-name = "blah"
-version = "0.1.0"
-description = "Social engagement agent CLI"
-readme = "README.md"
-requires-python = ">=3.12"
-dependencies = [
-    # CLI
-    "click>=8.1",
-    "rich>=13.0",
-    "prompt-toolkit>=3.0",
+**BaseAgent design** (`agents/base.py`):
+- `__init__(llm_client, db, settings)` — stores deps, initializes tool registry
+- `system_prompt() -> str` — subclasses override, injects context.md
+- `register_tool(func, schema)` — register tool with Anthropic-format schema
+- `run_chat(chat_key)` — main loop: load history → user input → Anthropic messages.create with tools → execute tool_use blocks → display text → save history
+- `_execute_tool(name, input) -> str` — dispatch to registered tool
+- `max_history_messages` — truncate old messages to control context growth
 
-    # LLM
-    "anthropic>=0.40",
-    "openai>=1.0",
+**Tool pattern** (`agents/tools/base.py`):
+- `@tool(name, description, parameters)` decorator attaches Anthropic tool schema to function
+- Each tool returns `ToolResult(content, is_error)`
 
-    # Platforms
-    "atproto>=0.0.50",
-    "Mastodon.py>=1.8",
-    "tweepy>=4.14",
+**Conversation loop**: Standard Anthropic tool use — send messages+tools, if stop_reason=="tool_use" execute and loop, if "end_turn" display and wait for input.
 
-    # Config & Validation
-    "pydantic>=2.0",
-    "pydantic-settings>=2.0",
-    "pyyaml>=6.0",
+---
 
-    # HTTP
-    "httpx>=0.27",
+## Phase 3: Publishing + Bluesky Adapter
 
-    # Observability
-    "structlog>=24.0",
-]
+**Goal**: `blah rant publish <id>` posts to Bluesky. First complete end-to-end flow. Also `blah context show/edit`.
 
-[project.scripts]
-blah = "blah.cli.main:cli"
+**Branch**: `phase-3-bluesky-publishing`
+**Dependencies to add**: atproto
 
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
-[tool.hatch.build.targets.wheel]
-packages = ["src/blah"]
-
-[dependency-groups]
-dev = [
-    "pytest>=8.0",
-    "pytest-asyncio>=0.23",
-    "pytest-cov>=5.0",
-    "responses>=0.25",
-    "ruff>=0.5",
-    "mypy>=1.10",
-]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-asyncio_mode = "auto"
-addopts = "--cov=blah --cov-report=term-missing"
-
-[tool.ruff]
-target-version = "py312"
-line-length = 100
-
-[tool.ruff.lint]
-select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM"]
-
-[tool.mypy]
-python_version = "3.12"
-strict = true
+**Files to create**:
+```
+src/blah/adapters/__init__.py
+src/blah/adapters/base.py         # PlatformAdapter ABC (post, reply, read, follow, fetch_feed) — synchronous
+src/blah/adapters/bluesky.py      # BlueskyAdapter using atproto
+src/blah/services/__init__.py
+src/blah/services/publishing.py   # PublishService: iterate approved pieces, call adapter, update status
+tests/test_publishing.py
+tests/test_bluesky_adapter.py
+tests/mocks/adapters.py           # MockPlatformAdapter
 ```
 
-## Implementation Phases
+**Update**: `cli/commands/rant.py` (publish/delete/failures/retry/mark-posted), `cli/commands/context.py` (show/edit), `db/repository.py` (piece status updates, failure tracking)
 
-### Phase 1: Foundation (Files: 15)
+**Piece status flow**: draft → approved (on finalize_rant) → publishing → published/failed
 
-1. **Project setup**
-   - `uv init blah --package --python ">=3.12"`
-   - Create directory structure
-   - Configure pyproject.toml
+---
 
-2. **Core infrastructure**
-   - `src/blah/config/settings.py` - Pydantic settings with env var loading
-   - `src/blah/adapters/db/schema.sql` - SQLite schema from design doc
-   - `src/blah/adapters/db/connection.py` - Connection management, init
-   - `src/blah/adapters/db/repository.py` - CRUD operations
+## Phase 4: Radar Flow
 
-3. **Observability setup**
-   - `src/blah/observability/logging_setup.py` - structlog config
-   - `src/blah/observability/context.py` - log context binding
-   - `src/blah/observability/errors.py` - error categorization
+**Goal**: `blah radar config` configures sources, `blah radar pull` fetches+triages+generates report, `blah radar report` reviews via chat.
 
-4. **CLI skeleton**
-   - `src/blah/cli/main.py` - Click group with all commands stubbed
-   - `src/blah/cli/commands/*.py` - Empty command files
+**Branch**: `phase-4-radar`
+**No new dependencies** — reuses Bluesky adapter for feed fetching.
 
-5. **Test infrastructure**
-   - `tests/conftest.py` - DB fixtures, mock fixtures
-   - `tests/factories.py` - Entity factories
-
-**Verification:**
-```bash
-uv run blah --help           # CLI works
-uv run blah init             # Creates ~/.blah/
-uv run pytest tests/         # Tests pass
+**Files to create**:
+```
+src/blah/agents/radar_config.py
+src/blah/agents/radar_report.py
+src/blah/agents/tools/radar_tools.py
+src/blah/models/source.py
+src/blah/models/feed_item.py
+src/blah/models/report.py
+src/blah/services/pipeline.py    # poll_sources → triage_items → generate_report
+src/blah/services/triage.py      # batch score items with Haiku against context.md
+tests/test_radar_config.py
+tests/test_radar_report.py
+tests/test_pipeline.py
+tests/test_triage.py
 ```
 
-### Phase 2: Models & Persistence (Files: 10)
+**Update**: `cli/commands/radar.py`, `db/repository.py` (SourceRepo, FeedItemRepo, ReportRepo, ReportItemRepo), `adapters/bluesky.py` (add fetch_feed)
 
-1. **Domain models** (Pydantic)
-   - `src/blah/models/rant.py` - Rant, Piece, Resource
-   - `src/blah/models/source.py` - Source with platform-specific config
-   - `src/blah/models/feed_item.py` - FeedItem with status
-   - `src/blah/models/report.py` - Report, ReportItem
-   - `src/blah/models/config.py` - Config schema
+**Pipeline**: `run()` does poll → triage → generate report, all synchronous.
+**Triage**: send batches of items + context.md to Haiku, score 0.0-1.0, items above 0.3 threshold pass.
 
-2. **Repository implementation**
-   - CRUD for all entities
-   - Chat history persistence
-   - Indexed queries for FeedItems
+---
 
-3. **Tests**
-   - Unit tests for all repository methods
-   - Factory tests
+## Phase 5: Context Manager + Twitter + Polish
 
-**Verification:**
-```bash
-uv run pytest tests/unit/adapters/db/
+**Goal**: Smart context.md updates via Context Manager Agent. Twitter adapter (second platform). Structured logging. Config commands.
+
+**Branch**: `phase-5-context-twitter-polish`
+**Dependencies to add**: twitterapi.io client (httpx for REST calls), xdk (official X SDK for writes), structlog
+
+### Twitter/X API Strategy
+
+**Split approach to control costs:**
+- **Reads** (feed fetching, post reading, search): **twitterapi.io** — third-party proxy, cheaper for high-volume read operations
+- **Writes** (posting, replying, following): **Official X API via xdk** — required for write operations, ensures compliance
+
+The TwitterAdapter will internally route to the appropriate client based on operation type. Both clients share the same credential configuration.
+
+**Files to create**:
+```
+src/blah/agents/context_manager.py     # Non-interactive agent, uses Opus 4.5
+src/blah/adapters/twitter.py           # TwitterAdapter: reads via twitterapi.io, writes via xdk
+src/blah/adapters/cache.py             # API response cache (SQLite-backed)
+src/blah/observability/__init__.py
+src/blah/observability/logging.py      # structlog setup
+src/blah/observability/llm_metrics.py  # token/cost tracking to SQLite
+tests/test_context_manager.py
+tests/test_twitter_adapter.py
+tests/test_llm_metrics.py
 ```
 
-### Phase 3: LLM Client (Files: 8)
+**Update**: `cli/commands/config.py`, `agents/tools/context_tools.py`, `db/` (new migration for llm_requests + api_cache tables), `db/repository.py` (LLMMetricsRepo), `llm/client.py` (token counting)
 
-1. **LLM abstraction**
-   - `src/blah/adapters/llm/base.py` - Protocol for LLM clients
-   - `src/blah/adapters/llm/anthropic.py` - Anthropic implementation
-   - `src/blah/observability/llm_metrics.py` - Token/cost tracking
+**X API Cache** (`adapters/cache.py`):
+SQLite-backed cache for all X API read operations.
+- Cache table in new Alembic migration
+- TTL configurable per operation type (feed: 5min, post read: 1hr, profile: 24hr)
+- Write operations never cached
 
-2. **Agent base class**
-   - `src/blah/agents/base.py` - Base agent with tool execution loop
-   - `src/blah/agents/tools/base.py` - @logged_tool decorator
+**Context Manager Agent**: non-interactive, invoked synchronously by other agents via `suggest_context_update()`. Uses Opus 4.5.
 
-3. **Test mocks**
-   - `tests/mocks/llm.py` - MockLLMClient, ScriptedLLMClient
+---
 
-**Verification:**
-```bash
-uv run pytest tests/unit/adapters/llm/
-# Manual: Test with real API key
-```
+## Critical Path
 
-### Phase 4: Rant Flow (Files: 10)
+Phase 1 ✓ → Phase 2 → Phase 3 → Phase 4 → Phase 5
 
-1. **Rant Agent**
-   - `src/blah/agents/rant.py` - Agent implementation
-   - `src/blah/agents/tools/rant_tools.py` - Tool implementations
-   - `src/blah/services/publishing.py` - Publish orchestration
+Phase 2 (`agents/base.py`) is the architectural linchpin — every agent depends on it.
+Phase 3 (`adapters/base.py`) defines the platform contract — all adapters implement it.
 
-2. **Bluesky Adapter**
-   - `src/blah/adapters/platforms/base.py` - PlatformAdapter ABC
-   - `src/blah/adapters/platforms/bluesky.py` - atproto implementation
+## Risk Mitigations
 
-3. **CLI commands**
-   - `src/blah/cli/commands/rant.py` - create, list, chat, publish, etc.
-
-4. **Tests**
-   - Unit tests for tools
-   - Integration test for agent loop with mocked LLM
-   - CLI tests with Click runner
-
-**Verification:**
-```bash
-uv run blah rant create      # Chat works
-uv run blah rant list        # Shows rants
-uv run blah rant publish 1   # Posts to Bluesky (with real creds)
-```
-
-### Phase 5: Radar Flow (Files: 12)
-
-1. **Radar Agents**
-   - `src/blah/agents/radar_config.py`
-   - `src/blah/agents/radar_report.py`
-   - `src/blah/agents/research.py` - Non-interactive enrichment
-   - `src/blah/agents/tools/radar_tools.py`
-
-2. **Pipeline**
-   - `src/blah/services/pipeline.py` - poll → triage → research → report
-
-3. **CLI commands**
-   - `src/blah/cli/commands/radar.py` - config, pull, report, status
-
-**Verification:**
-```bash
-uv run blah radar config     # Configure sources
-uv run blah radar pull       # Fetch and triage items
-uv run blah radar report     # Review report
-```
-
-### Phase 6: Context Manager & More Adapters (Files: 8)
-
-1. **Context Manager Agent**
-   - `src/blah/agents/context_manager.py`
-   - `src/blah/agents/tools/context_tools.py`
-
-2. **Additional Adapters**
-   - `src/blah/adapters/platforms/mastodon.py`
-   - `src/blah/adapters/platforms/twitter.py`
-
-3. **CLI**
-   - `src/blah/cli/commands/context.py`
-
-**Verification:**
-```bash
-uv run blah context show
-# Test cross-platform publishing
-```
-
-### Phase 7: Stats & Polish (Files: 5)
-
-1. **Metrics & Stats**
-   - `src/blah/observability/metrics_store.py`
-   - `src/blah/cli/commands/stats.py`
-
-2. **Error handling polish**
-   - Consistent user-facing error messages
-   - Retry logic for retriable errors
-
-3. **Full test coverage**
-   - Integration tests for all flows
-   - Edge cases
-
-**Verification:**
-```bash
-uv run blah stats summary
-uv run pytest --cov-report=html  # Check coverage
-```
-
-## Testing Strategy
-
-### Unit Tests
-- **Agent tools** - Test without LLM, pure function testing
-- **Adapters** - Mock HTTP with `responses` library
-- **Repository** - In-memory SQLite
-- **Coverage target**: 80%+ for tools, adapters, repository
-
-### Integration Tests
-- **Agent loops** - Scripted LLM mock returns pre-defined responses
-- **CLI commands** - Click's CliRunner
-- **Pipeline** - Full poll→report with mocked adapters
-
-### Fixtures
-- `tests/factories.py` - RantFactory, PieceFactory, FeedItemFactory, LLMResponseFactory
-- `tests/fixtures/context_samples/` - Sample context.md files
-- `tests/fixtures/llm_responses/` - Scripted conversation flows
-
-## Observability
-
-### Logging (structlog)
-- Console: human-readable with colors (INFO default)
-- File: JSON or key-value in `~/.blah/logs/`
-- Context binding for agent_id, rant_id, correlation_id
-
-### Metrics (SQLite tables)
-- `llm_requests` - token usage, cost, latency
-- `platform_operations` - success/failure, latency
-- `pipeline_metrics_daily` - aggregated pipeline stats
-
-### CLI Stats
-```bash
-blah stats summary    # Usage overview
-blah stats errors     # Recent errors
-blah stats cost       # Cost breakdown
-```
-
-## Key Files to Create First
-
-1. `pyproject.toml` - Project config, dependencies, entry point
-2. `src/blah/config/settings.py` - Settings with Pydantic
-3. `src/blah/adapters/db/schema.sql` - Full SQLite schema
-4. `src/blah/observability/logging_setup.py` - structlog setup
-5. `src/blah/cli/main.py` - Click entry point
-6. `tests/conftest.py` - Core fixtures
-7. `src/blah/agents/base.py` - Base agent class
-8. `src/blah/adapters/platforms/base.py` - Platform adapter ABC
-
-## Commands to Initialize
-
-```bash
-# Create project
-cd /home/mark/blah
-uv init --package --python ">=3.12"
-
-# Add dependencies
-uv add click rich prompt-toolkit anthropic openai atproto Mastodon.py tweepy pydantic pydantic-settings pyyaml httpx structlog
-
-# Add dev dependencies
-uv add --group dev pytest pytest-asyncio pytest-cov responses ruff mypy
-
-# Create structure
-mkdir -p src/blah/{cli/commands,agents/tools,services,adapters/{llm,platforms,db},models,observability,config}
-mkdir -p tests/{unit/{agents,adapters,services},integration,mocks,fixtures/{context_samples,llm_responses}}
-
-# Type marker
-touch src/blah/py.typed
-
-# Verify
-uv run blah --help
-uv run pytest
-```
+- **Chat history growth**: BaseAgent `max_history_messages` to truncate old messages
+- **Context.md token counting**: word-count heuristic (~0.75 words/token) or `anthropic.count_tokens()`
+- **Triage cost**: batch items 20-30 per Haiku call
+- **atproto SDK instability**: pin version, adapter layer isolates breakage
+- **twitterapi.io reliability**: cache aggressively, fallback gracefully on errors
