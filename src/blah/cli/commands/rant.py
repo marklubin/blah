@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import click
 from rich.console import Console
 from rich.table import Table
@@ -13,6 +15,13 @@ from blah.db.repository import PieceRepo, RantRepo
 console = Console()
 
 
+def _truncate_error(error: str | None, max_len: int = 60) -> str:
+    """Truncate error message for table display."""
+    if not error:
+        return ""
+    return error[:max_len] + "..." if len(error) > max_len else error
+
+
 def _require_init() -> BlahSettings:
     """Load settings, abort if not initialized."""
     home = get_blah_home()
@@ -20,6 +29,21 @@ def _require_init() -> BlahSettings:
         console.print("[red]Blah not initialized. Run 'blah init' first.[/red]")
         raise SystemExit(1)
     return BlahSettings.load()
+
+
+def _get_adapters(settings: BlahSettings) -> dict:
+    """Build platform adapters from settings."""
+    from blah.adapters.bluesky import BlueskyAdapter
+
+    adapters = {}
+
+    bsky = settings.platforms.get("bluesky")
+    if bsky and bsky.enabled and bsky.handle and bsky.app_password:
+        adapter = BlueskyAdapter(handle=bsky.handle, app_password=bsky.app_password)
+        adapter.authenticate()
+        adapters["bluesky"] = adapter
+
+    return adapters
 
 
 @click.group()
@@ -168,32 +192,179 @@ def chat(rant_id: str):
 @click.argument("rant_id")
 def publish(rant_id: str):
     """Publish approved pieces for a rant."""
-    console.print("[yellow]Not implemented yet. Coming in Phase 3.[/yellow]")
+    from blah.services.publishing import PublishService
+
+    settings = _require_init()
+    conn = get_db(settings.db_path)
+
+    try:
+        rant_repo = RantRepo(conn)
+        r = rant_repo.get(rant_id)
+        if r is None:
+            console.print(f"[red]Rant {rant_id} not found.[/red]")
+            raise SystemExit(1)
+
+        pieces = PieceRepo(conn).list_by_rant(rant_id)
+        approved = [p for p in pieces if p["status"] == "approved"]
+        if not approved:
+            console.print(f"[yellow]No approved pieces for rant {rant_id}.[/yellow]")
+            console.print("[dim]Use 'blah rant chat' to finalize the rant first.[/dim]")
+            return
+
+        console.print(f"Publishing {len(approved)} piece(s) for rant {rant_id}...\n")
+
+        adapters = _get_adapters(settings)
+        if not adapters:
+            console.print("[red]No platform adapters configured.[/red]")
+            console.print("[dim]Configure credentials in ~/.blah/config.yaml[/dim]")
+            raise SystemExit(1)
+
+        service = PublishService(conn, adapters)
+        result = service.publish_rant(rant_id)
+
+        for p in result.published:
+            platform = p["platform"]
+            console.print(f"  [green]Published[/green] {platform}: {p.get('external_url', '')}")
+
+        for p in result.failed:
+            platform = p["platform"]
+            console.print(f"  [red]Failed[/red] {platform}: {p.get('error', 'unknown error')}")
+
+        for p in result.skipped:
+            platform = p["platform"]
+            console.print(f"  [yellow]Skipped[/yellow] {platform}: no adapter configured")
+
+        console.print(f"\n{result.summary}")
+    finally:
+        conn.close()
 
 
 @rant.command()
 @click.argument("rant_id")
-def delete(rant_id: str):
-    """Delete a rant."""
-    console.print("[yellow]Not implemented yet. Coming in Phase 3.[/yellow]")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+def delete(rant_id: str, yes: bool):
+    """Delete a rant and all its pieces."""
+    settings = _require_init()
+    conn = get_db(settings.db_path)
+
+    try:
+        rant_repo = RantRepo(conn)
+        r = rant_repo.get(rant_id)
+        if r is None:
+            console.print(f"[red]Rant {rant_id} not found.[/red]")
+            raise SystemExit(1)
+
+        if not yes:
+            title = r["title"] or "(untitled)"
+            click.confirm(f"Delete rant '{title}' ({rant_id})?", abort=True)
+
+        # Delete pieces first (foreign key)
+        conn.execute("DELETE FROM pieces WHERE rant_id = ?", (rant_id,))
+        conn.execute("DELETE FROM rant_resources WHERE rant_id = ?", (rant_id,))
+        rant_repo.delete(rant_id)
+        console.print(f"[green]Deleted rant {rant_id}.[/green]")
+    finally:
+        conn.close()
 
 
 @rant.command()
 def failures():
-    """List failed pieces."""
-    console.print("[yellow]Not implemented yet. Coming in Phase 3.[/yellow]")
+    """List failed pieces across all rants."""
+    settings = _require_init()
+    conn = get_db(settings.db_path)
+
+    try:
+        piece_repo = PieceRepo(conn)
+        failed = piece_repo.list_failed()
+
+        if not failed:
+            console.print("[dim]No failed pieces.[/dim]")
+            return
+
+        table = Table(title="Failed Pieces")
+        table.add_column("Piece ID", style="bold")
+        table.add_column("Rant ID")
+        table.add_column("Platform")
+        table.add_column("Retries")
+        table.add_column("Error")
+
+        for p in failed:
+            platform = p["platform"]
+            table.add_row(
+                p["id"],
+                p["rant_id"],
+                platform,
+                str(p.get("retry_count", 0) or 0),
+                _truncate_error(p.get("error")),
+            )
+
+        console.print(table)
+    finally:
+        conn.close()
 
 
 @rant.command()
 @click.argument("piece_id")
 def retry(piece_id: str):
     """Retry a failed piece."""
-    console.print("[yellow]Not implemented yet. Coming in Phase 3.[/yellow]")
+    from blah.services.publishing import PublishService
+
+    settings = _require_init()
+    conn = get_db(settings.db_path)
+
+    try:
+        piece_repo = PieceRepo(conn)
+        piece = piece_repo.get(piece_id)
+        if piece is None:
+            console.print(f"[red]Piece {piece_id} not found.[/red]")
+            raise SystemExit(1)
+
+        if piece["status"] != "failed":
+            status = piece["status"]
+            console.print(f"[yellow]Piece {piece_id} is '{status}', not 'failed'.[/yellow]")
+            return
+
+        adapters = _get_adapters(settings)
+        if not adapters:
+            console.print("[red]No platform adapters configured.[/red]")
+            raise SystemExit(1)
+
+        console.print(f"Retrying piece {piece_id} ({piece['platform']})...")
+
+        service = PublishService(conn, adapters)
+        result = service.publish_piece(piece_id)
+
+        if result.published:
+            p = result.published[0]
+            console.print(f"[green]Published[/green]: {p.get('external_url', '')}")
+        elif result.failed:
+            p = result.failed[0]
+            console.print(f"[red]Failed again[/red]: {p.get('error', 'unknown')}")
+    finally:
+        conn.close()
 
 
 @rant.command("mark-posted")
 @click.argument("piece_id")
 @click.argument("url")
 def mark_posted(piece_id: str, url: str):
-    """Mark a piece as manually posted."""
-    console.print("[yellow]Not implemented yet. Coming in Phase 3.[/yellow]")
+    """Mark a piece as manually posted with its URL."""
+    settings = _require_init()
+    conn = get_db(settings.db_path)
+
+    try:
+        piece_repo = PieceRepo(conn)
+        piece = piece_repo.get(piece_id)
+        if piece is None:
+            console.print(f"[red]Piece {piece_id} not found.[/red]")
+            raise SystemExit(1)
+
+        piece_repo.update(
+            piece_id,
+            status="published",
+            external_url=url,
+            published_at=datetime.now().isoformat(),
+        )
+        console.print(f"[green]Marked piece {piece_id} as posted.[/green]")
+    finally:
+        conn.close()
