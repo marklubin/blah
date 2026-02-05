@@ -185,6 +185,46 @@ class RantTools:
         )
 
     @tool(
+        name="list_pieces",
+        description=(
+            "List all pieces for this rant with their full content, status, and character count. "
+            "Use this to show the user what has been drafted before publishing."
+        ),
+        parameters={"type": "object", "properties": {}},
+    )
+    def list_pieces(self) -> ToolResult:
+        pieces = self.piece_repo.list_by_rant(self.rant_id)
+        if not pieces:
+            return ToolResult(
+                content=json.dumps({
+                    "pieces": [],
+                    "message": "No pieces created yet for this rant.",
+                })
+            )
+
+        result = []
+        for piece in pieces:
+            char_count = len(piece["content"])
+            char_limit = PLATFORM_LIMITS.get(piece["platform"])
+            over_limit = char_limit and char_count > char_limit
+            result.append({
+                "piece_id": piece["id"],
+                "platform": piece["platform"],
+                "status": piece["status"],
+                "char_count": char_count,
+                "char_limit": char_limit,
+                "over_limit": over_limit,
+                "content": piece["content"],
+            })
+
+        return ToolResult(
+            content=json.dumps({
+                "pieces": result,
+                "total": len(result),
+            })
+        )
+
+    @tool(
         name="finalize_rant",
         description=(
             "Mark the rant as active and all draft pieces as approved. "
