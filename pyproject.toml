@@ -16,6 +16,7 @@ dependencies = [
     "alembic>=1.18.3",
     "anthropic>=0.77.1",
     "atproto>=0.0.55",
+    "httpx>=0.27",
 ]
 
 [project.scripts]

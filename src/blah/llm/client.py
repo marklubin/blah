@@ -12,7 +12,7 @@ class LLMClient:
 
     def __init__(self, api_key: str | None = None, model: str | None = None):
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
-        self.model = model or "claude-sonnet-4-5-20250514"
+        self.model = model or "claude-sonnet-4-5"
         self._client = anthropic.Anthropic(api_key=self.api_key)
 
     def chat(

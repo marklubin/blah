@@ -1,0 +1,106 @@
+"""Publishing tools for the Rant Agent."""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+
+from blah.agents.tools.base import ToolResult, tool
+from blah.config.settings import BlahSettings
+
+
+class PublishTools:
+    """Tool methods for publishing rants directly from chat."""
+
+    def __init__(self, conn: sqlite3.Connection, settings: BlahSettings, rant_id: str):
+        self.conn = conn
+        self.settings = settings
+        self.rant_id = rant_id
+        self._adapters: dict | None = None
+
+    def _get_adapters(self) -> dict:
+        """Lazily build and authenticate platform adapters."""
+        if self._adapters is not None:
+            return self._adapters
+
+        from blah.adapters.bluesky import BlueskyAdapter
+
+        self._adapters = {}
+
+        bsky = self.settings.platforms.get("bluesky")
+        if bsky and bsky.enabled and bsky.handle and bsky.app_password:
+            adapter = BlueskyAdapter(handle=bsky.handle, app_password=bsky.app_password)
+            adapter.authenticate()
+            self._adapters["bluesky"] = adapter
+
+        return self._adapters
+
+    @tool(
+        name="publish_rant",
+        description=(
+            "Publish all approved pieces for this rant to their platforms. "
+            "Call finalize_rant first to mark pieces as approved. "
+            "Returns the URLs of published posts."
+        ),
+        parameters={"type": "object", "properties": {}},
+    )
+    def publish_rant(self) -> ToolResult:
+        from blah.db.repository import PieceRepo, RantRepo
+        from blah.services.publishing import PublishService
+
+        rant_repo = RantRepo(self.conn)
+        piece_repo = PieceRepo(self.conn)
+
+        rant = rant_repo.get(self.rant_id)
+        if rant is None:
+            return ToolResult(
+                content=json.dumps({"error": "Rant not found"}),
+                is_error=True,
+            )
+
+        pieces = piece_repo.list_by_rant(self.rant_id)
+        approved = [p for p in pieces if p["status"] == "approved"]
+
+        if not approved:
+            return ToolResult(
+                content=json.dumps({
+                    "error": "No approved pieces to publish",
+                    "hint": "Call finalize_rant first to approve pieces",
+                }),
+                is_error=True,
+            )
+
+        adapters = self._get_adapters()
+        if not adapters:
+            return ToolResult(
+                content=json.dumps({
+                    "error": "No platform adapters configured",
+                    "hint": "Configure platform credentials in ~/.blah/config.yaml",
+                }),
+                is_error=True,
+            )
+
+        service = PublishService(self.conn, adapters)
+        result = service.publish_rant(self.rant_id)
+
+        published_urls = [
+            {"platform": p["platform"], "url": p.get("external_url")}
+            for p in result.published
+        ]
+        failed = [
+            {"platform": p["platform"], "error": p.get("error")}
+            for p in result.failed
+        ]
+        skipped = [
+            {"platform": p["platform"], "reason": "no adapter"}
+            for p in result.skipped
+        ]
+
+        return ToolResult(
+            content=json.dumps({
+                "published": published_urls,
+                "failed": failed,
+                "skipped": skipped,
+                "summary": result.summary,
+            })
+        )

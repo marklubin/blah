@@ -32,17 +32,17 @@ class ModelConfig(BaseModel):
     """Configuration for a model tier."""
 
     provider: str = "anthropic"
-    model: str = "claude-sonnet-4-5-20250514"
+    model: str = "claude-sonnet-4-5"
 
 
 class ModelsConfig(BaseModel):
     """Model configuration for different task types."""
 
     triage: ModelConfig = Field(
-        default_factory=lambda: ModelConfig(model="claude-haiku-4-5-20250414")
+        default_factory=lambda: ModelConfig(model="claude-sonnet-4-5")
     )
     research: ModelConfig = Field(
-        default_factory=lambda: ModelConfig(model="claude-haiku-4-5-20250414")
+        default_factory=lambda: ModelConfig(model="claude-sonnet-4-5")
     )
     conversation: ModelConfig = Field(default_factory=ModelConfig)
 

@@ -41,13 +41,13 @@ DEFAULT_CONFIG_YAML = """# Blah configuration
 models:
   triage:
     provider: anthropic
-    model: claude-haiku-4-5-20250414
+    model: claude-sonnet-4-5
   research:
     provider: anthropic
-    model: claude-haiku-4-5-20250414
+    model: claude-sonnet-4-5
   conversation:
     provider: anthropic
-    model: claude-sonnet-4-5-20250514
+    model: claude-sonnet-4-5
 
 context:
   path: context.md

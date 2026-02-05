@@ -8,6 +8,7 @@ from typing import Any
 
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.status import Status
 
 from blah.agents.tools.base import ToolRegistry, ToolResult, collect_tools
 from blah.config.settings import BlahSettings
@@ -72,7 +73,8 @@ class BaseAgent:
         while True:
             # Get user input
             try:
-                user_input = input("\nyou: ").strip()
+                console.print()
+                user_input = console.input("[bold green]you:[/bold green] ").strip()
             except (KeyboardInterrupt, EOFError):
                 console.print("\n[dim]Ending chat.[/dim]")
                 break
@@ -95,11 +97,12 @@ class BaseAgent:
     def _agent_loop(self, messages: list[dict], tools: list[dict]) -> list[dict]:
         """Call LLM, execute any tool calls, loop until end_turn or no tool use."""
         while True:
-            response = self.llm.chat(
-                messages=messages,
-                system=self.system_prompt(),
-                tools=tools if tools else None,
-            )
+            with Status("[bold cyan]Thinking...[/bold cyan]", console=console):
+                response = self.llm.chat(
+                    messages=messages,
+                    system=self.system_prompt(),
+                    tools=tools if tools else None,
+                )
 
             # Build the assistant message content blocks
             assistant_content = []
@@ -120,6 +123,7 @@ class BaseAgent:
             for block in response.content:
                 if block.type == "text" and block.text.strip():
                     console.print()
+                    console.print("[bold blue]agent:[/bold blue]")
                     console.print(Markdown(block.text))
 
             # If no tool use, we're done

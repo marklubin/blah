@@ -7,7 +7,9 @@ import sqlite3
 from blah.agents.base import BaseAgent
 from blah.agents.tools.base import collect_tools
 from blah.agents.tools.context_tools import ContextTools
+from blah.agents.tools.publish_tools import PublishTools
 from blah.agents.tools.rant_tools import RantTools
+from blah.agents.tools.web_tools import WebTools
 from blah.config.settings import BlahSettings
 from blah.db.repository import PieceRepo, RantRepo
 from blah.llm.client import LLMClient
@@ -30,6 +32,8 @@ class RantAgent(BaseAgent):
         # Create tool instances and register their tools
         self._rant_tools = RantTools(db, rant_id)
         self._context_tools = ContextTools(settings.context_path)
+        self._publish_tools = PublishTools(db, settings, rant_id)
+        self._web_tools = WebTools()
 
         # Must call super().__init__ after setting up tool instances
         # because it calls collect_tools(self) — but we use external tool objects
@@ -39,6 +43,10 @@ class RantAgent(BaseAgent):
         for tool_def in collect_tools(self._rant_tools):
             self.tool_registry.register(tool_def)
         for tool_def in collect_tools(self._context_tools):
+            self.tool_registry.register(tool_def)
+        for tool_def in collect_tools(self._publish_tools):
+            self.tool_registry.register(tool_def)
+        for tool_def in collect_tools(self._web_tools):
             self.tool_registry.register(tool_def)
 
     def system_prompt(self) -> str:
@@ -76,6 +84,8 @@ You help create and refine rants — content for posting across platforms.
 - Use set_title and set_summary to structure the rant before creating pieces
 - Use create_piece to draft content for each platform
 - Use finalize_rant when the user is satisfied and ready to publish
+- Use publish_rant to post approved pieces to platforms (the user can say "post it")
+- Use web_search and fetch_url to research topics and gather context
 - Use suggest_context_update when you learn something about the user's preferences"""
 
 
