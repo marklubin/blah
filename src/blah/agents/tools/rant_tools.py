@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 
 from blah.agents.tools.base import ToolResult, tool
 from blah.db.repository import PieceRepo, RantRepo
+
+logger = logging.getLogger(__name__)
 
 
 class RantTools:
@@ -17,6 +20,7 @@ class RantTools:
         self.rant_id = rant_id
         self.rant_repo = RantRepo(conn)
         self.piece_repo = PieceRepo(conn)
+        logger.debug("RantTools initialized for rant: %s", rant_id)
 
     @tool(
         name="set_title",

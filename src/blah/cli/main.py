@@ -71,6 +71,11 @@ platforms:
 @click.version_option(version=__version__, prog_name="blah")
 def cli():
     """Blah - Social engagement agent. Makes noise so you don't have to."""
+    # Set up logging if home exists
+    home = get_blah_home()
+    if home.exists():
+        from blah.logging import setup_logging
+        setup_logging(home)
 
 
 @cli.command()

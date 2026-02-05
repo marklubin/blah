@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from typing import Any
 
@@ -16,6 +17,7 @@ from blah.config.settings import BlahSettings
 from blah.db.repository import ChatHistoryRepo
 from blah.llm.client import LLMClient
 
+logger = logging.getLogger(__name__)
 console = Console()
 
 
@@ -62,10 +64,13 @@ class BaseAgent:
 
     def run_chat(self, chat_key: str) -> None:
         """Main chat loop: load history, get input, call LLM, execute tools, repeat."""
+        logger.info("Starting chat session: %s", chat_key)
         messages = self.chat_history_repo.get(chat_key)
         messages = self._truncate_history(messages)
+        logger.debug("Loaded %d messages from history", len(messages))
 
         tools = self.tool_registry.list_schemas()
+        logger.debug("Registered %d tools: %s", len(tools), [t["name"] for t in tools])
 
         # If resuming with history, show a brief note
         if messages:
@@ -98,16 +103,21 @@ class BaseAgent:
             ))
 
             messages.append({"role": "user", "content": user_input})
+            logger.debug("User input: %s", user_input[:100])
 
             # LLM loop: call API, handle tool use, repeat until end_turn
             messages = self._agent_loop(messages, tools)
 
             # Save after each exchange
             self.chat_history_repo.save(chat_key, messages)
+            logger.debug("Saved %d messages to history", len(messages))
 
     def _agent_loop(self, messages: list[dict], tools: list[dict]) -> list[dict]:
         """Call LLM with streaming, execute any tool calls, loop until done."""
+        loop_count = 0
         while True:
+            loop_count += 1
+            logger.debug("Agent loop iteration %d", loop_count)
             console.print()
 
             # Stream the response
@@ -157,15 +167,25 @@ class BaseAgent:
             # Build the assistant message content blocks
             assistant_content = response.to_content_blocks()
             messages.append({"role": "assistant", "content": assistant_content})
+            logger.debug(
+                "LLM response: %d chars text, %d tool calls, stop_reason=%s",
+                len(response.text), len(response.tool_uses), response.stop_reason,
+            )
 
             # If no tool use, we're done
             if response.stop_reason != "tool_use":
+                logger.debug("Agent loop complete after %d iterations", loop_count)
                 break
 
             # Execute tool calls and add results
             tool_results = []
             for tool in response.tool_uses:
+                logger.info("Executing tool: %s with input: %s", tool["name"], tool["input"])
                 result = self._execute_tool(tool["name"], tool["input"])
+                logger.debug(
+                    "Tool result: is_error=%s, content=%s",
+                    result.is_error, result.content[:200],
+                )
                 error_prefix = "[red]error:[/red] " if result.is_error else ""
                 truncated = _truncate(result.content, 200)
                 tool_output = f"[dim]{tool['name']}[/dim] → {error_prefix}{truncated}"

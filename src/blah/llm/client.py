@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 
 import anthropic
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -39,6 +42,7 @@ class LLMClient:
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
         self.model = model or "claude-sonnet-4-5"
         self._client = anthropic.Anthropic(api_key=self.api_key)
+        logger.info("LLMClient initialized with model: %s", self.model)
 
     def chat(
         self,
@@ -83,6 +87,7 @@ class LLMClient:
         response = StreamedResponse()
         current_tool: dict | None = None
 
+        logger.debug("Starting streaming request to %s", self.model)
         with self._client.messages.stream(**kwargs) as stream:
             for event in stream:
                 if event.type == "content_block_start":
