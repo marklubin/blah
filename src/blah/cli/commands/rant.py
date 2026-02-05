@@ -34,14 +34,36 @@ def _require_init() -> BlahSettings:
 def _get_adapters(settings: BlahSettings) -> dict:
     """Build platform adapters from settings."""
     from blah.adapters.bluesky import BlueskyAdapter
+    from blah.adapters.twitter import TwitterAdapter
 
     adapters = {}
 
+    # Bluesky
     bsky = settings.platforms.get("bluesky")
     if bsky and bsky.enabled and bsky.handle and bsky.app_password:
         adapter = BlueskyAdapter(handle=bsky.handle, app_password=bsky.app_password)
         adapter.authenticate()
         adapters["bluesky"] = adapter
+
+    # Twitter/X
+    twitter = settings.platforms.get("twitter")
+    if (
+        twitter
+        and twitter.enabled
+        and twitter.consumer_key
+        and twitter.consumer_secret
+        and twitter.access_token
+        and twitter.access_token_secret
+    ):
+        adapter = TwitterAdapter(
+            consumer_key=twitter.consumer_key,
+            consumer_secret=twitter.consumer_secret,
+            access_token=twitter.access_token,
+            access_token_secret=twitter.access_token_secret,
+            twitterapi_io_key=getattr(twitter, "twitterapi_io_key", None),
+        )
+        adapter.authenticate()
+        adapters["twitter"] = adapter
 
     return adapters
 

@@ -27,15 +27,38 @@ class PublishTools:
             return self._adapters
 
         from blah.adapters.bluesky import BlueskyAdapter
+        from blah.adapters.twitter import TwitterAdapter
 
         self._adapters = {}
 
+        # Bluesky
         bsky = self.settings.platforms.get("bluesky")
         if bsky and bsky.enabled and bsky.handle and bsky.app_password:
             logger.info("Initializing Bluesky adapter for %s", bsky.handle)
             adapter = BlueskyAdapter(handle=bsky.handle, app_password=bsky.app_password)
             adapter.authenticate()
             self._adapters["bluesky"] = adapter
+
+        # Twitter/X
+        twitter = self.settings.platforms.get("twitter")
+        if (
+            twitter
+            and twitter.enabled
+            and twitter.consumer_key
+            and twitter.consumer_secret
+            and twitter.access_token
+            and twitter.access_token_secret
+        ):
+            logger.info("Initializing Twitter adapter")
+            adapter = TwitterAdapter(
+                consumer_key=twitter.consumer_key,
+                consumer_secret=twitter.consumer_secret,
+                access_token=twitter.access_token,
+                access_token_secret=twitter.access_token_secret,
+                twitterapi_io_key=getattr(twitter, "twitterapi_io_key", None),
+            )
+            adapter.authenticate()
+            self._adapters["twitter"] = adapter
 
         logger.debug("Initialized %d platform adapters", len(self._adapters))
         return self._adapters

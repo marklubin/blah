@@ -19,13 +19,18 @@ class PlatformCredentials(BaseModel):
     """Credentials for a single platform."""
 
     enabled: bool = False
+    # Bluesky
     handle: str | None = None
     app_password: str | None = None
+    # Mastodon
     instance: str | None = None
     access_token: str | None = None
+    # Twitter/X (official API for writes)
     consumer_key: str | None = None
     consumer_secret: str | None = None
     access_token_secret: str | None = None
+    # Twitter/X (twitterapi.io for reads - optional)
+    twitterapi_io_key: str | None = None
 
 
 class ModelConfig(BaseModel):
