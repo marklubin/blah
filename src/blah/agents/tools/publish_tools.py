@@ -124,11 +124,15 @@ class PublishTools:
             for p in result.skipped
         ]
 
+        # Mark as error if all posts failed
+        is_error = len(failed) > 0 and len(published_urls) == 0
+
         return ToolResult(
             content=json.dumps({
                 "published": published_urls,
                 "failed": failed,
                 "skipped": skipped,
                 "summary": result.summary,
-            })
+            }),
+            is_error=is_error,
         )

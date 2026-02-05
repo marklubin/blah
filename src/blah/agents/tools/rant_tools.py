@@ -11,6 +11,20 @@ from blah.db.repository import PieceRepo, RantRepo
 
 logger = logging.getLogger(__name__)
 
+# Platform character limits
+PLATFORM_LIMITS = {
+    "bluesky": 300,
+    "twitter": 280,
+}
+
+
+def _check_content_length(platform: str, content: str) -> str | None:
+    """Check if content exceeds platform limit. Returns warning message or None."""
+    limit = PLATFORM_LIMITS.get(platform)
+    if limit and len(content) > limit:
+        return f"Content is {len(content)} chars, exceeds {platform} limit of {limit}"
+    return None
+
 
 class RantTools:
     """Tool methods for rant creation and editing. Bound to a specific rant."""
@@ -60,7 +74,8 @@ class RantTools:
         name="create_piece",
         description=(
             "Create a platform-specific piece of content for this rant. "
-            "Supported platforms: bluesky, twitter."
+            "Supported platforms: bluesky (300 char limit), twitter (280 char limit). "
+            "Content MUST be within the platform's character limit or it will fail to post."
         ),
         parameters={
             "type": "object",
@@ -88,6 +103,20 @@ class RantTools:
         content: str,
         target: dict | None = None,
     ) -> ToolResult:
+        # Check content length
+        warning = _check_content_length(platform, content)
+        if warning:
+            limit = PLATFORM_LIMITS.get(platform, 300)
+            return ToolResult(
+                content=json.dumps({
+                    "error": warning,
+                    "hint": f"Please shorten the content to {limit} characters or less",
+                    "current_length": len(content),
+                    "limit": limit,
+                }),
+                is_error=True,
+            )
+
         piece = self.piece_repo.create(
             rant_id=self.rant_id,
             platform=platform,
@@ -99,12 +128,17 @@ class RantTools:
                 "piece_id": piece["id"],
                 "platform": piece["platform"],
                 "status": piece["status"],
+                "char_count": len(content),
+                "char_limit": PLATFORM_LIMITS.get(platform),
             })
         )
 
     @tool(
         name="update_piece",
-        description="Update the content of an existing piece.",
+        description=(
+            "Update the content of an existing piece. "
+            "Content MUST be within the platform's character limit."
+        ),
         parameters={
             "type": "object",
             "properties": {
@@ -123,12 +157,30 @@ class RantTools:
                 content=json.dumps({"error": "Piece does not belong to this rant"}),
                 is_error=True,
             )
+
+        # Check content length for the piece's platform
+        platform = piece["platform"]
+        warning = _check_content_length(platform, content)
+        if warning:
+            limit = PLATFORM_LIMITS.get(platform, 300)
+            return ToolResult(
+                content=json.dumps({
+                    "error": warning,
+                    "hint": f"Please shorten the content to {limit} characters or less",
+                    "current_length": len(content),
+                    "limit": limit,
+                }),
+                is_error=True,
+            )
+
         updated = self.piece_repo.update(piece_id, content=content)
         return ToolResult(
             content=json.dumps({
                 "piece_id": updated["id"],
                 "platform": updated["platform"],
                 "content": updated["content"],
+                "char_count": len(content),
+                "char_limit": PLATFORM_LIMITS.get(platform),
             })
         )
 
