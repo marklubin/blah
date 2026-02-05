@@ -28,6 +28,14 @@ class MockMessage:
     content: list = field(default_factory=list)
     stop_reason: str = "end_turn"
 
+    @property
+    def text(self) -> str:
+        """Extract text content for compatibility with services."""
+        for block in self.content:
+            if hasattr(block, "text"):
+                return block.text
+        return ""
+
 
 class MockLLMClient:
     """LLM client that returns scripted responses for testing.

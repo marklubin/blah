@@ -14,7 +14,15 @@ class MockPlatformAdapter(PlatformAdapter):
         self._authenticated = False
         self.posts: list[PostContent] = []
         self.deleted: list[str] = []
+        self.followed: list[str] = []
         self._post_counter = 0
+
+        # Configurable mock data for feed fetching
+        self.timeline_items: list[dict] = []
+        self.author_feeds: dict[str, list[dict]] = {}
+        self.profiles: dict[str, dict] = {}
+        self.threads: dict[str, dict] = {}
+        self.search_results: list[dict] = []
 
     @property
     def platform_name(self) -> str:
@@ -44,3 +52,48 @@ class MockPlatformAdapter(PlatformAdapter):
 
     def get_post(self, external_id: str) -> dict | None:
         return {"id": external_id, "text": "mock post"}
+
+    # Feed fetching methods (for Radar)
+
+    def get_timeline(self, limit: int = 50, cursor: str | None = None) -> dict:
+        """Return mock timeline items."""
+        return {
+            "items": self.timeline_items[:limit],
+            "cursor": "mock_cursor" if self.timeline_items else None,
+        }
+
+    def get_author_feed(
+        self, handle: str, limit: int = 50, cursor: str | None = None
+    ) -> dict:
+        """Return mock author feed."""
+        items = self.author_feeds.get(handle, [])
+        return {
+            "items": items[:limit],
+            "cursor": "mock_cursor" if items else None,
+        }
+
+    def get_post_thread(self, uri: str, depth: int = 10) -> dict | None:
+        """Return mock thread."""
+        return self.threads.get(uri, {
+            "post": {"text": "mock post", "author": {"handle": "mock"}},
+            "parents": [],
+            "replies": [],
+        })
+
+    def follow(self, handle: str) -> bool:
+        """Mock follow - records the handle."""
+        self.followed.append(handle)
+        return True
+
+    def search_posts(self, query: str, limit: int = 25) -> list[dict]:
+        """Return mock search results."""
+        return self.search_results[:limit]
+
+    def get_profile(self, handle: str) -> dict | None:
+        """Return mock profile."""
+        return self.profiles.get(handle, {
+            "handle": handle,
+            "display_name": f"Mock {handle}",
+            "description": "Mock profile",
+            "followers_count": 100,
+        })
