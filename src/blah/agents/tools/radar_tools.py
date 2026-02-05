@@ -204,6 +204,168 @@ class RadarConfigTools:
             content=f"Source {label} {status}",
         )
 
+    @tool(
+        name="search_posts",
+        description="Search for posts on a platform to discover interesting accounts.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "platform": {
+                    "type": "string",
+                    "description": "Platform to search: 'bluesky' or 'twitter'",
+                    "enum": ["bluesky", "twitter"],
+                },
+                "query": {
+                    "type": "string",
+                    "description": "Search query (keywords, topics, etc.)",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max results to return (default 10)",
+                },
+            },
+            "required": ["platform", "query"],
+        },
+    )
+    def search_posts(
+        self, platform: str, query: str, limit: int = 10
+    ) -> ToolResult:
+        adapter = self._adapters.get(platform)
+        if not adapter:
+            return ToolResult(
+                content=f"Error: No adapter configured for {platform}",
+                is_error=True,
+            )
+
+        try:
+            posts = adapter.search_posts(query, limit=limit)
+            if not posts:
+                return ToolResult(content=f"No posts found for '{query}' on {platform}")
+
+            lines = [f"Search results for '{query}' on {platform}:\n"]
+            for i, post in enumerate(posts, 1):
+                author = post.get("author", {})
+                handle = author.get("handle", "unknown") if isinstance(author, dict) else author
+                text = post.get("text", "")[:100]
+                url = post.get("url", "")
+                lines.append(f"{i}. @{handle}")
+                lines.append(f"   {text}...")
+                if url:
+                    lines.append(f"   {url}")
+                lines.append("")
+
+            return ToolResult(content="\n".join(lines))
+        except Exception as e:
+            logger.exception("Search posts failed: %s", e)
+            return ToolResult(content=f"Error searching: {e}", is_error=True)
+
+    @tool(
+        name="get_profile",
+        description="Get a user's profile. Use to learn about someone before adding as a source.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "platform": {
+                    "type": "string",
+                    "description": "Platform: 'bluesky' or 'twitter'",
+                    "enum": ["bluesky", "twitter"],
+                },
+                "handle": {
+                    "type": "string",
+                    "description": "User handle (e.g., karpathy.bsky.social)",
+                },
+            },
+            "required": ["platform", "handle"],
+        },
+    )
+    def get_profile(self, platform: str, handle: str) -> ToolResult:
+        adapter = self._adapters.get(platform)
+        if not adapter:
+            return ToolResult(
+                content=f"Error: No adapter configured for {platform}",
+                is_error=True,
+            )
+
+        try:
+            profile = adapter.get_profile(handle)
+            if not profile:
+                return ToolResult(content=f"Profile not found: @{handle}")
+
+            lines = [
+                f"**@{profile.get('handle', handle)}**",
+            ]
+            if profile.get("display_name"):
+                lines.append(f"Name: {profile['display_name']}")
+            if profile.get("description"):
+                lines.append(f"Bio: {profile['description']}")
+            if profile.get("followers_count"):
+                lines.append(f"Followers: {profile['followers_count']:,}")
+            if profile.get("follows_count"):
+                lines.append(f"Following: {profile['follows_count']:,}")
+            if profile.get("posts_count"):
+                lines.append(f"Posts: {profile['posts_count']:,}")
+
+            return ToolResult(content="\n".join(lines))
+        except Exception as e:
+            logger.exception("Get profile failed: %s", e)
+            return ToolResult(content=f"Error fetching profile: {e}", is_error=True)
+
+    @tool(
+        name="get_recent_posts",
+        description="Get recent posts from a user to preview their content.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "platform": {
+                    "type": "string",
+                    "description": "Platform: 'bluesky' or 'twitter'",
+                    "enum": ["bluesky", "twitter"],
+                },
+                "handle": {
+                    "type": "string",
+                    "description": "User handle",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max posts to return (default 5)",
+                },
+            },
+            "required": ["platform", "handle"],
+        },
+    )
+    def get_recent_posts(
+        self, platform: str, handle: str, limit: int = 5
+    ) -> ToolResult:
+        adapter = self._adapters.get(platform)
+        if not adapter:
+            return ToolResult(
+                content=f"Error: No adapter configured for {platform}",
+                is_error=True,
+            )
+
+        try:
+            result = adapter.get_author_feed(handle, limit=limit)
+            posts = result.get("items", [])
+            if not posts:
+                return ToolResult(content=f"No recent posts from @{handle}")
+
+            lines = [f"Recent posts from @{handle}:\n"]
+            for i, post in enumerate(posts, 1):
+                text = post.get("text", "")[:150]
+                url = post.get("url", "")
+                likes = post.get("like_count", 0)
+                lines.append(f"{i}. {text}...")
+                if likes:
+                    lines.append(f"   ❤️ {likes}")
+                if url:
+                    lines.append(f"   {url}")
+                lines.append("")
+
+            return ToolResult(content="\n".join(lines))
+        except Exception as e:
+            logger.exception("Get recent posts failed: %s", e)
+            return ToolResult(content=f"Error fetching posts: {e}", is_error=True)
+
 
 class RadarReportTools:
     """Tools for reviewing radar reports and engaging."""

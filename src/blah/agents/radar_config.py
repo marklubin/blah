@@ -9,6 +9,7 @@ from blah.agents.base import BaseAgent
 from blah.agents.tools.base import collect_tools
 from blah.agents.tools.context_tools import ContextTools
 from blah.agents.tools.radar_tools import RadarConfigTools
+from blah.agents.tools.web_tools import WebTools
 from blah.config.settings import BlahSettings
 from blah.db.repository import SourceRepo
 from blah.llm.client import LLMClient
@@ -30,6 +31,7 @@ class RadarConfigAgent(BaseAgent):
         # Create tool instances
         self._config_tools = RadarConfigTools(db, adapters)
         self._context_tools = ContextTools(settings.context_path)
+        self._web_tools = WebTools()
 
         super().__init__(llm_client, db, settings)
 
@@ -37,6 +39,8 @@ class RadarConfigAgent(BaseAgent):
         for tool_def in collect_tools(self._config_tools):
             self.tool_registry.register(tool_def)
         for tool_def in collect_tools(self._context_tools):
+            self.tool_registry.register(tool_def)
+        for tool_def in collect_tools(self._web_tools):
             self.tool_registry.register(tool_def)
 
     def system_prompt(self) -> str:
@@ -70,10 +74,17 @@ You help configure what feeds and accounts to monitor for relevant signals.
 - **timeline**: Monitor your home feed
 - **search**: Track posts matching a keyword/phrase (requires query)
 
+## Discovery Tools
+- **web_search**: Search the web to find interesting people/topics
+- **search_posts**: Search posts on a platform to find relevant accounts
+- **get_profile**: Look up a user's profile before adding them
+- **get_recent_posts**: Preview someone's content before adding
+
 ## Guidelines
 - Start by understanding what the user wants to track
-- Suggest relevant accounts based on their interests
-- Use search sources for specific topics or keywords
+- Use web_search to find interesting people in their areas of interest
+- Use search_posts to discover relevant accounts on platforms
+- Use get_profile and get_recent_posts to vet accounts before adding
 - Don't add too many sources at once — quality over quantity
 - Explain what each source will capture
 - Use suggest_context_update when you learn new interests or preferences
