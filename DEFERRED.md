@@ -17,8 +17,6 @@ Features explicitly out of scope for MVP and why.
 
 ## Chat UI
 - **prompt_toolkit chat UI** — Upgrade from `input()` later for readline, history, autocomplete
-- **Streaming LLM responses** — Currently waits for full response; should stream token-by-token for better UX
-- **Rich colors/formatting** — Improve chat UI with colored prompts, spinners, better visual hierarchy
 - **Connection resilience** — Handle network interrupts/reconnects gracefully; add timeouts and retry logic
 
 ## LLM

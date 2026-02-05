@@ -7,8 +7,9 @@ import sqlite3
 from typing import Any
 
 from rich.console import Console
+from rich.live import Live
 from rich.markdown import Markdown
-from rich.status import Status
+from rich.panel import Panel
 
 from blah.agents.tools.base import ToolRegistry, ToolResult, collect_tools
 from blah.config.settings import BlahSettings
@@ -86,6 +87,16 @@ class BaseAgent:
                 console.print("[dim]Ending chat.[/dim]")
                 break
 
+            # Display user message in a panel
+            console.print()
+            console.print(Panel(
+                user_input,
+                title="[bold green]you[/bold green]",
+                title_align="left",
+                border_style="green",
+                padding=(0, 1),
+            ))
+
             messages.append({"role": "user", "content": user_input})
 
             # LLM loop: call API, handle tool use, repeat until end_turn
@@ -95,36 +106,57 @@ class BaseAgent:
             self.chat_history_repo.save(chat_key, messages)
 
     def _agent_loop(self, messages: list[dict], tools: list[dict]) -> list[dict]:
-        """Call LLM, execute any tool calls, loop until end_turn or no tool use."""
+        """Call LLM with streaming, execute any tool calls, loop until done."""
         while True:
-            with Status("[bold cyan]Thinking...[/bold cyan]", console=console):
-                response = self.llm.chat(
+            console.print()
+
+            # Stream the response
+            streamed_text = ""
+            response = None
+
+            initial_panel = Panel(
+                "...",
+                title="[bold blue]agent[/bold blue]",
+                title_align="left",
+                border_style="blue",
+                padding=(0, 1),
+            )
+            with Live(
+                initial_panel,
+                console=console,
+                refresh_per_second=10,
+                transient=False,
+            ) as live:
+                for event_type, resp in self.llm.chat_stream(
                     messages=messages,
                     system=self.system_prompt(),
                     tools=tools if tools else None,
-                )
+                ):
+                    response = resp
+                    if event_type == "text_delta":
+                        streamed_text = resp.text
+                        # Update the live panel with streamed text
+                        live.update(Panel(
+                            Markdown(streamed_text) if streamed_text else "...",
+                            title="[bold blue]agent[/bold blue]",
+                            title_align="left",
+                            border_style="blue",
+                            padding=(0, 1),
+                        ))
+                    elif event_type == "done":
+                        # Final update
+                        if streamed_text:
+                            live.update(Panel(
+                                Markdown(streamed_text),
+                                title="[bold blue]agent[/bold blue]",
+                                title_align="left",
+                                border_style="blue",
+                                padding=(0, 1),
+                            ))
 
             # Build the assistant message content blocks
-            assistant_content = []
-            for block in response.content:
-                if block.type == "text":
-                    assistant_content.append({"type": "text", "text": block.text})
-                elif block.type == "tool_use":
-                    assistant_content.append({
-                        "type": "tool_use",
-                        "id": block.id,
-                        "name": block.name,
-                        "input": block.input,
-                    })
-
+            assistant_content = response.to_content_blocks()
             messages.append({"role": "assistant", "content": assistant_content})
-
-            # Display text blocks
-            for block in response.content:
-                if block.type == "text" and block.text.strip():
-                    console.print()
-                    console.print("[bold blue]agent:[/bold blue]")
-                    console.print(Markdown(block.text))
 
             # If no tool use, we're done
             if response.stop_reason != "tool_use":
@@ -132,20 +164,24 @@ class BaseAgent:
 
             # Execute tool calls and add results
             tool_results = []
-            for block in response.content:
-                if block.type == "tool_use":
-                    result = self._execute_tool(block.name, block.input)
-                    console.print(
-                        f"  [dim]tool:{block.name} → "
-                        f"{'error: ' if result.is_error else ''}"
-                        f"{_truncate(result.content, 100)}[/dim]"
-                    )
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": result.content,
-                        "is_error": result.is_error,
-                    })
+            for tool in response.tool_uses:
+                result = self._execute_tool(tool["name"], tool["input"])
+                error_prefix = "[red]error:[/red] " if result.is_error else ""
+                truncated = _truncate(result.content, 200)
+                tool_output = f"[dim]{tool['name']}[/dim] → {error_prefix}{truncated}"
+                console.print(Panel(
+                    tool_output,
+                    title="[bold yellow]tool[/bold yellow]",
+                    title_align="left",
+                    border_style="yellow",
+                    padding=(0, 1),
+                ))
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": tool["id"],
+                    "content": result.content,
+                    "is_error": result.is_error,
+                })
 
             messages.append({"role": "user", "content": tool_results})
 

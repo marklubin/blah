@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
+
+from blah.llm.client import StreamedResponse
 
 
 @dataclass
@@ -87,3 +90,52 @@ class MockLLMClient:
         response = self._responses[self._call_count]
         self._call_count += 1
         return response
+
+    def chat_stream(
+        self,
+        messages: list[dict],
+        system: str | None = None,
+        tools: list[dict] | None = None,
+        max_tokens: int = 4096,
+    ) -> Iterator[tuple[str, StreamedResponse]]:
+        """Stream a scripted response (simulated)."""
+        self.calls.append({
+            "messages": messages,
+            "system": system,
+            "tools": tools,
+            "max_tokens": max_tokens,
+        })
+
+        if self._call_count >= len(self._responses):
+            response = StreamedResponse(
+                text="(no more scripted responses)",
+                tool_uses=[],
+                stop_reason="end_turn",
+            )
+            yield ("text_delta", response)
+            yield ("done", response)
+            return
+
+        mock_msg = self._responses[self._call_count]
+        self._call_count += 1
+
+        response = StreamedResponse(
+            text="",
+            tool_uses=[],
+            stop_reason=mock_msg.stop_reason,
+        )
+
+        # Simulate streaming text
+        for block in mock_msg.content:
+            if block.type == "text":
+                response.text = block.text
+                yield ("text_delta", response)
+            elif block.type == "tool_use":
+                response.tool_uses.append({
+                    "id": block.id,
+                    "name": block.name,
+                    "input": block.input,
+                })
+                yield ("tool_use", response)
+
+        yield ("done", response)
