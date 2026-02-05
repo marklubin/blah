@@ -50,21 +50,22 @@ class PublishService:
         self._adapters = adapters
 
     def publish_rant(self, rant_id: str) -> PublishResult:
-        """Publish all approved pieces for a rant."""
+        """Publish all approved and failed (retry) pieces for a rant."""
         rant = self._rant_repo.get(rant_id)
         if rant is None:
             raise ValueError(f"Rant {rant_id} not found")
 
         pieces = self._piece_repo.list_by_rant(rant_id)
-        approved = [p for p in pieces if p["status"] == "approved"]
+        # Include both approved pieces and failed pieces (for retry)
+        to_publish = [p for p in pieces if p["status"] in ("approved", "failed")]
 
-        if not approved:
-            logger.info("No approved pieces for rant %s", rant_id)
+        if not to_publish:
+            logger.info("No pieces to publish for rant %s", rant_id)
             return PublishResult()
 
         result = PublishResult()
 
-        for piece in approved:
+        for piece in to_publish:
             platform = piece["platform"]
             adapter = self._adapters.get(platform)
 
