@@ -1,0 +1,7 @@
+name = "blah-suggest"
+main = "src/index.js"
+compatibility_date = "2024-12-01"
+
+[[kv_namespaces]]
+binding = "SUGGESTIONS"
+id = "15708eae0d674d70a111148a3c18b9df"

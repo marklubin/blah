@@ -41,17 +41,25 @@ DEFAULT_CONFIG_YAML = """# Blah configuration
 models:
   triage:
     provider: anthropic
-    model: claude-haiku-4-5-20250414
+    model: claude-sonnet-4-5
   research:
     provider: anthropic
-    model: claude-haiku-4-5-20250414
+    model: claude-sonnet-4-5
   conversation:
     provider: anthropic
-    model: claude-sonnet-4-5-20250514
+    model: claude-sonnet-4-5
 
 context:
   path: context.md
   max_tokens: 2000
+
+queue:
+  enabled: false
+  # account_id: ...
+  # kv_namespace_id: ...
+  # api_token: ...
+  # worker_url: https://blah-suggest.xxx.workers.dev
+  # worker_token: ...
 
 platforms:
   bluesky:
@@ -60,10 +68,9 @@ platforms:
     # app_password: xxxx-xxxx-xxxx-xxxx
   twitter:
     enabled: false
-    # consumer_key: ...
-    # consumer_secret: ...
-    # access_token: ...
-    # access_token_secret: ...
+    # Run 'blah config auth twitter' to authenticate
+    # client_id: ...
+    # twitterapi_io_key: ...
 """
 
 
@@ -71,6 +78,11 @@ platforms:
 @click.version_option(version=__version__, prog_name="blah")
 def cli():
     """Blah - Social engagement agent. Makes noise so you don't have to."""
+    # Set up logging if home exists
+    home = get_blah_home()
+    if home.exists():
+        from blah.logging import setup_logging
+        setup_logging(home)
 
 
 @cli.command()

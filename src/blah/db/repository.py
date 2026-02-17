@@ -12,6 +12,93 @@ def _new_id() -> str:
     return uuid.uuid4().hex[:12]
 
 
+# ─────────────────────────────────────────────────────────────────
+# Suggestion queue
+# ─────────────────────────────────────────────────────────────────
+
+
+class SuggestionRepo:
+    """Repository for rant suggestions pulled from the cloud queue."""
+
+    def __init__(self, conn: sqlite3.Connection):
+        self.conn = conn
+
+    def create(
+        self, idea: str, source: str = "api", tags: list[str] | None = None
+    ) -> dict:
+        suggestion_id = _new_id()
+        self.conn.execute(
+            "INSERT INTO suggestions (id, idea, source, tags) VALUES (?, ?, ?, ?)",
+            (suggestion_id, idea, source, json.dumps(tags or [])),
+        )
+        self.conn.commit()
+        return self.get(suggestion_id)
+
+    def get(self, suggestion_id: str) -> dict | None:
+        row = self.conn.execute(
+            "SELECT * FROM suggestions WHERE id = ?", (suggestion_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_dict(row)
+
+    def list_by_status(self, status: str = "queued") -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM suggestions WHERE status = ? ORDER BY created_at DESC",
+            (status,),
+        ).fetchall()
+        return [self._row_to_dict(r) for r in rows]
+
+    def list_all(self) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM suggestions ORDER BY created_at DESC"
+        ).fetchall()
+        return [self._row_to_dict(r) for r in rows]
+
+    def update(self, suggestion_id: str, **fields) -> dict | None:
+        if not fields:
+            return self.get(suggestion_id)
+        if "tags" in fields and isinstance(fields["tags"], list):
+            fields["tags"] = json.dumps(fields["tags"])
+        set_clause = ", ".join(f"{k} = ?" for k in fields)
+        values = list(fields.values()) + [suggestion_id]
+        self.conn.execute(
+            f"UPDATE suggestions SET {set_clause} WHERE id = ?",  # noqa: S608
+            values,
+        )
+        self.conn.commit()
+        return self.get(suggestion_id)
+
+    def delete(self, suggestion_id: str) -> bool:
+        cursor = self.conn.execute(
+            "DELETE FROM suggestions WHERE id = ?", (suggestion_id,)
+        )
+        self.conn.commit()
+        return cursor.rowcount > 0
+
+    def count(self, status: str | None = None) -> int:
+        if status:
+            row = self.conn.execute(
+                "SELECT COUNT(*) as cnt FROM suggestions WHERE status = ?", (status,)
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                "SELECT COUNT(*) as cnt FROM suggestions"
+            ).fetchone()
+        return row["cnt"]
+
+    def _row_to_dict(self, row) -> dict:
+        result = dict(row)
+        if result.get("tags"):
+            result["tags"] = json.loads(result["tags"])
+        return result
+
+
+# ─────────────────────────────────────────────────────────────────
+# Rant flow
+# ─────────────────────────────────────────────────────────────────
+
+
 class RantRepo:
     def __init__(self, conn: sqlite3.Connection):
         self.conn = conn
@@ -161,30 +248,336 @@ class ChatHistoryRepo:
         self.conn.commit()
 
 
-# Stubs for radar repos (Phase 4)
+# ─────────────────────────────────────────────────────────────────
+# Radar repositories
+# ─────────────────────────────────────────────────────────────────
+
+
 class SourceRepo:
+    """Repository for radar sources (accounts, feeds to monitor)."""
+
     def __init__(self, conn: sqlite3.Connection):
         self.conn = conn
+
+    def create(
+        self,
+        platform: str,
+        source_type: str,
+        config: dict,
+        enabled: bool = True,
+    ) -> dict:
+        source_id = _new_id()
+        self.conn.execute(
+            "INSERT INTO sources (id, platform, type, config, state, enabled) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (source_id, platform, source_type, json.dumps(config), "{}", enabled),
+        )
+        self.conn.commit()
+        return self.get(source_id)
+
+    def get(self, source_id: str) -> dict | None:
+        row = self.conn.execute(
+            "SELECT * FROM sources WHERE id = ?", (source_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_dict(row)
+
+    def list_all(self, enabled_only: bool = False) -> list[dict]:
+        if enabled_only:
+            rows = self.conn.execute(
+                "SELECT * FROM sources WHERE enabled = 1"
+            ).fetchall()
+        else:
+            rows = self.conn.execute("SELECT * FROM sources").fetchall()
+        return [self._row_to_dict(r) for r in rows]
+
+    def list_by_platform(self, platform: str) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM sources WHERE platform = ? AND enabled = 1",
+            (platform,),
+        ).fetchall()
+        return [self._row_to_dict(r) for r in rows]
+
+    def update(self, source_id: str, **fields) -> dict | None:
+        if not fields:
+            return self.get(source_id)
+        if "config" in fields and isinstance(fields["config"], dict):
+            fields["config"] = json.dumps(fields["config"])
+        if "state" in fields and isinstance(fields["state"], dict):
+            fields["state"] = json.dumps(fields["state"])
+        set_clause = ", ".join(f"{k} = ?" for k in fields)
+        values = list(fields.values()) + [source_id]
+        self.conn.execute(
+            f"UPDATE sources SET {set_clause} WHERE id = ?",  # noqa: S608
+            values,
+        )
+        self.conn.commit()
+        return self.get(source_id)
+
+    def delete(self, source_id: str) -> bool:
+        cursor = self.conn.execute("DELETE FROM sources WHERE id = ?", (source_id,))
+        self.conn.commit()
+        return cursor.rowcount > 0
 
     def count(self) -> int:
         row = self.conn.execute("SELECT COUNT(*) as cnt FROM sources").fetchone()
         return row["cnt"]
 
+    def _row_to_dict(self, row) -> dict:
+        result = dict(row)
+        if result.get("config"):
+            result["config"] = json.loads(result["config"])
+        if result.get("state"):
+            result["state"] = json.loads(result["state"])
+        return result
+
 
 class FeedItemRepo:
+    """Repository for feed items (posts fetched from sources)."""
+
     def __init__(self, conn: sqlite3.Connection):
         self.conn = conn
+
+    def create(
+        self,
+        source_id: str,
+        platform: str,
+        external_id: str,
+        author: str,
+        content: str,
+        url: str | None = None,
+    ) -> dict:
+        item_id = _new_id()
+        self.conn.execute(
+            "INSERT INTO feed_items "
+            "(id, source_id, platform, external_id, url, author, content, status) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (item_id, source_id, platform, external_id, url, author, content, "raw"),
+        )
+        self.conn.commit()
+        return self.get(item_id)
+
+    def get(self, item_id: str) -> dict | None:
+        row = self.conn.execute(
+            "SELECT * FROM feed_items WHERE id = ?", (item_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_dict(row)
+
+    def get_by_external_id(self, platform: str, external_id: str) -> dict | None:
+        """Check if we already have this item (deduplication)."""
+        row = self.conn.execute(
+            "SELECT * FROM feed_items WHERE platform = ? AND external_id = ?",
+            (platform, external_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_dict(row)
+
+    def list_by_status(self, status: str, limit: int = 100) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM feed_items WHERE status = ? "
+            "ORDER BY fetched_at DESC LIMIT ?",
+            (status, limit),
+        ).fetchall()
+        return [self._row_to_dict(r) for r in rows]
+
+    def list_by_source(self, source_id: str, limit: int = 50) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM feed_items WHERE source_id = ? "
+            "ORDER BY fetched_at DESC LIMIT ?",
+            (source_id, limit),
+        ).fetchall()
+        return [self._row_to_dict(r) for r in rows]
+
+    def list_by_report(self, report_id: str) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM feed_items WHERE report_id = ? "
+            "ORDER BY relevance_score DESC",
+            (report_id,),
+        ).fetchall()
+        return [self._row_to_dict(r) for r in rows]
+
+    def update(self, item_id: str, **fields) -> dict | None:
+        if not fields:
+            return self.get(item_id)
+        if "enrichment" in fields and isinstance(fields["enrichment"], dict):
+            fields["enrichment"] = json.dumps(fields["enrichment"])
+        set_clause = ", ".join(f"{k} = ?" for k in fields)
+        values = list(fields.values()) + [item_id]
+        self.conn.execute(
+            f"UPDATE feed_items SET {set_clause} WHERE id = ?",  # noqa: S608
+            values,
+        )
+        self.conn.commit()
+        return self.get(item_id)
+
+    def count(self, status: str | None = None) -> int:
+        if status:
+            row = self.conn.execute(
+                "SELECT COUNT(*) as cnt FROM feed_items WHERE status = ?", (status,)
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                "SELECT COUNT(*) as cnt FROM feed_items"
+            ).fetchone()
+        return row["cnt"]
+
+    def _row_to_dict(self, row) -> dict:
+        result = dict(row)
+        if result.get("enrichment"):
+            result["enrichment"] = json.loads(result["enrichment"])
+        return result
 
 
 class ReportRepo:
+    """Repository for radar reports."""
+
     def __init__(self, conn: sqlite3.Connection):
         self.conn = conn
 
-    def count(self) -> int:
-        row = self.conn.execute("SELECT COUNT(*) as cnt FROM reports").fetchone()
+    def create(self, sources_polled: list[str] | None = None) -> dict:
+        report_id = _new_id()
+        self.conn.execute(
+            "INSERT INTO reports (id, status, sources_polled) VALUES (?, ?, ?)",
+            (report_id, "pending", json.dumps(sources_polled or [])),
+        )
+        self.conn.commit()
+        return self.get(report_id)
+
+    def get(self, report_id: str) -> dict | None:
+        row = self.conn.execute(
+            "SELECT * FROM reports WHERE id = ?", (report_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_dict(row)
+
+    def get_latest_pending(self) -> dict | None:
+        """Get the oldest pending report for review."""
+        row = self.conn.execute(
+            "SELECT * FROM reports WHERE status = 'pending' "
+            "ORDER BY generated_at ASC LIMIT 1"
+        ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_dict(row)
+
+    def list_all(self, limit: int = 20) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM reports ORDER BY generated_at DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [self._row_to_dict(r) for r in rows]
+
+    def update(self, report_id: str, **fields) -> dict | None:
+        if not fields:
+            return self.get(report_id)
+        if "sources_polled" in fields and isinstance(fields["sources_polled"], list):
+            fields["sources_polled"] = json.dumps(fields["sources_polled"])
+        set_clause = ", ".join(f"{k} = ?" for k in fields)
+        values = list(fields.values()) + [report_id]
+        self.conn.execute(
+            f"UPDATE reports SET {set_clause} WHERE id = ?",  # noqa: S608
+            values,
+        )
+        self.conn.commit()
+        return self.get(report_id)
+
+    def count(self, status: str | None = None) -> int:
+        if status:
+            row = self.conn.execute(
+                "SELECT COUNT(*) as cnt FROM reports WHERE status = ?", (status,)
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                "SELECT COUNT(*) as cnt FROM reports"
+            ).fetchone()
         return row["cnt"]
+
+    def _row_to_dict(self, row) -> dict:
+        result = dict(row)
+        if result.get("sources_polled"):
+            result["sources_polled"] = json.loads(result["sources_polled"])
+        return result
 
 
 class ReportItemRepo:
+    """Repository for report items (signals, follows, trends)."""
+
     def __init__(self, conn: sqlite3.Connection):
         self.conn = conn
+
+    def create(
+        self,
+        report_id: str,
+        item_type: str,
+        data: dict,
+        relevance_score: float | None = None,
+    ) -> dict:
+        item_id = _new_id()
+        self.conn.execute(
+            "INSERT INTO report_items (id, report_id, type, data, relevance_score, status) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (item_id, report_id, item_type, json.dumps(data), relevance_score, "new"),
+        )
+        self.conn.commit()
+        return self.get(item_id)
+
+    def get(self, item_id: str) -> dict | None:
+        row = self.conn.execute(
+            "SELECT * FROM report_items WHERE id = ?", (item_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_dict(row)
+
+    def list_by_report(self, report_id: str, status: str | None = None) -> list[dict]:
+        if status:
+            rows = self.conn.execute(
+                "SELECT * FROM report_items WHERE report_id = ? AND status = ? "
+                "ORDER BY relevance_score DESC",
+                (report_id, status),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM report_items WHERE report_id = ? "
+                "ORDER BY relevance_score DESC",
+                (report_id,),
+            ).fetchall()
+        return [self._row_to_dict(r) for r in rows]
+
+    def update(self, item_id: str, **fields) -> dict | None:
+        if not fields:
+            return self.get(item_id)
+        if "data" in fields and isinstance(fields["data"], dict):
+            fields["data"] = json.dumps(fields["data"])
+        set_clause = ", ".join(f"{k} = ?" for k in fields)
+        values = list(fields.values()) + [item_id]
+        self.conn.execute(
+            f"UPDATE report_items SET {set_clause} WHERE id = ?",  # noqa: S608
+            values,
+        )
+        self.conn.commit()
+        return self.get(item_id)
+
+    def count_by_report(self, report_id: str, status: str | None = None) -> int:
+        if status:
+            row = self.conn.execute(
+                "SELECT COUNT(*) as cnt FROM report_items "
+                "WHERE report_id = ? AND status = ?",
+                (report_id, status),
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                "SELECT COUNT(*) as cnt FROM report_items WHERE report_id = ?",
+                (report_id,),
+            ).fetchone()
+        return row["cnt"]
+
+    def _row_to_dict(self, row) -> dict:
+        result = dict(row)
+        if result.get("data"):
+            result["data"] = json.loads(result["data"])
+        return result
