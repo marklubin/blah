@@ -182,10 +182,12 @@ class TestPublishTools:
         )
         settings.platforms["twitter"] = MagicMock(
             enabled=True,
-            consumer_key="key",
-            consumer_secret="secret",
-            access_token="token",
-            access_token_secret="token_secret",
+            client_id="test_client_id",
+            oauth2_token={
+                "access_token": "tok",
+                "refresh_token": "ref",
+                "expires_at": 9999999999,
+            },
             twitterapi_io_key=None,
         )
 

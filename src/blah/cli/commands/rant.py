@@ -1,16 +1,17 @@
-"""Rant commands - create, list, show, chat, publish, delete."""
+"""Rant commands - create, list, show, chat, publish, delete, suggestions."""
 
 from __future__ import annotations
 
 from datetime import datetime
 
 import click
+import httpx
 from rich.console import Console
 from rich.table import Table
 
 from blah.config.settings import BlahSettings, get_blah_home
 from blah.db.connection import get_db, init_db
-from blah.db.repository import PieceRepo, RantRepo
+from blah.db.repository import PieceRepo, RantRepo, SuggestionRepo
 
 console = Console()
 
@@ -47,20 +48,13 @@ def _get_adapters(settings: BlahSettings) -> dict:
 
     # Twitter/X
     twitter = settings.platforms.get("twitter")
-    if (
-        twitter
-        and twitter.enabled
-        and twitter.consumer_key
-        and twitter.consumer_secret
-        and twitter.access_token
-        and twitter.access_token_secret
-    ):
+    if twitter and twitter.enabled and twitter.client_id and twitter.oauth2_token:
         adapter = TwitterAdapter(
-            consumer_key=twitter.consumer_key,
-            consumer_secret=twitter.consumer_secret,
-            access_token=twitter.access_token,
-            access_token_secret=twitter.access_token_secret,
-            twitterapi_io_key=getattr(twitter, "twitterapi_io_key", None),
+            client_id=twitter.client_id,
+            oauth2_token=twitter.oauth2_token,
+            client_secret=twitter.client_secret,
+            twitterapi_io_key=twitter.twitterapi_io_key,
+            settings=settings,
         )
         adapter.authenticate()
         adapters["twitter"] = adapter
@@ -388,5 +382,113 @@ def mark_posted(piece_id: str, url: str):
             published_at=datetime.now().isoformat(),
         )
         console.print(f"[green]Marked piece {piece_id} as posted.[/green]")
+    finally:
+        conn.close()
+
+
+# ─────────────────────────────────────────────────────────────────
+# Suggestion commands
+# ─────────────────────────────────────────────────────────────────
+
+
+@rant.command("pull-suggestions")
+def pull_suggestions():
+    """Pull suggestions from the cloud queue into local storage."""
+    settings = _require_init()
+    if not settings.queue.enabled:
+        console.print("[red]Queue not configured. Add queue settings to config.yaml[/red]")
+        raise SystemExit(1)
+
+    conn = init_db(settings.db_path)
+    try:
+        repo = SuggestionRepo(conn)
+        q = settings.queue
+        kv_base = (
+            f"https://api.cloudflare.com/client/v4/accounts/{q.account_id}"
+            f"/storage/kv/namespaces/{q.kv_namespace_id}"
+        )
+        headers = {"Authorization": f"Bearer {q.api_token}"}
+
+        # List all keys in the KV namespace
+        resp = httpx.get(f"{kv_base}/keys", headers=headers)
+        resp.raise_for_status()
+        keys = resp.json().get("result", [])
+
+        if not keys:
+            console.print("[dim]No new suggestions in queue.[/dim]")
+            return
+
+        # Fetch each value, store locally, then delete from KV
+        count = 0
+        for key_info in keys:
+            key = key_info["name"]
+            val_resp = httpx.get(f"{kv_base}/values/{key}", headers=headers)
+            if val_resp.status_code != 200:
+                continue
+            body = val_resp.json()
+            repo.create(
+                idea=body["idea"],
+                source=body.get("source", "api"),
+                tags=body.get("tags", []),
+            )
+            httpx.delete(f"{kv_base}/values/{key}", headers=headers)
+            count += 1
+
+        console.print(f"[green]Pulled {count} suggestion(s)[/green]")
+    finally:
+        conn.close()
+
+
+@rant.command("suggestions")
+def list_suggestions():
+    """List rant suggestions."""
+    settings = _require_init()
+    conn = get_db(settings.db_path)
+
+    try:
+        repo = SuggestionRepo(conn)
+        suggestions = repo.list_all()
+
+        if not suggestions:
+            console.print("[dim]No suggestions. Use 'blah rant suggest' or pull from queue.[/dim]")
+            return
+
+        table = Table(title="Suggestions")
+        table.add_column("ID", style="bold")
+        table.add_column("Idea")
+        table.add_column("Source")
+        table.add_column("Tags")
+        table.add_column("Status")
+        table.add_column("Created")
+
+        for s in suggestions:
+            idea = s["idea"]
+            idea_display = idea[:60] + "..." if len(idea) > 60 else idea
+            tags = ", ".join(s.get("tags", [])) if s.get("tags") else ""
+            table.add_row(
+                s["id"],
+                idea_display,
+                s.get("source", ""),
+                tags,
+                s["status"],
+                s.get("created_at", ""),
+            )
+
+        console.print(table)
+    finally:
+        conn.close()
+
+
+@rant.command("suggest")
+@click.argument("idea")
+def suggest(idea: str):
+    """Add a suggestion directly (without the queue)."""
+    settings = _require_init()
+    conn = init_db(settings.db_path)
+
+    try:
+        repo = SuggestionRepo(conn)
+        s = repo.create(idea=idea, source="cli")
+        console.print(f"[green]Added suggestion {s['id']}[/green]")
     finally:
         conn.close()

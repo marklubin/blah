@@ -24,6 +24,7 @@ def test_schema_creates_tables(db: sqlite3.Connection):
         "reports",
         "report_items",
         "chat_histories",
+        "suggestions",
     }
     assert expected.issubset(tables)
 

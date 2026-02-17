@@ -12,6 +12,93 @@ def _new_id() -> str:
     return uuid.uuid4().hex[:12]
 
 
+# ─────────────────────────────────────────────────────────────────
+# Suggestion queue
+# ─────────────────────────────────────────────────────────────────
+
+
+class SuggestionRepo:
+    """Repository for rant suggestions pulled from the cloud queue."""
+
+    def __init__(self, conn: sqlite3.Connection):
+        self.conn = conn
+
+    def create(
+        self, idea: str, source: str = "api", tags: list[str] | None = None
+    ) -> dict:
+        suggestion_id = _new_id()
+        self.conn.execute(
+            "INSERT INTO suggestions (id, idea, source, tags) VALUES (?, ?, ?, ?)",
+            (suggestion_id, idea, source, json.dumps(tags or [])),
+        )
+        self.conn.commit()
+        return self.get(suggestion_id)
+
+    def get(self, suggestion_id: str) -> dict | None:
+        row = self.conn.execute(
+            "SELECT * FROM suggestions WHERE id = ?", (suggestion_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_dict(row)
+
+    def list_by_status(self, status: str = "queued") -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM suggestions WHERE status = ? ORDER BY created_at DESC",
+            (status,),
+        ).fetchall()
+        return [self._row_to_dict(r) for r in rows]
+
+    def list_all(self) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM suggestions ORDER BY created_at DESC"
+        ).fetchall()
+        return [self._row_to_dict(r) for r in rows]
+
+    def update(self, suggestion_id: str, **fields) -> dict | None:
+        if not fields:
+            return self.get(suggestion_id)
+        if "tags" in fields and isinstance(fields["tags"], list):
+            fields["tags"] = json.dumps(fields["tags"])
+        set_clause = ", ".join(f"{k} = ?" for k in fields)
+        values = list(fields.values()) + [suggestion_id]
+        self.conn.execute(
+            f"UPDATE suggestions SET {set_clause} WHERE id = ?",  # noqa: S608
+            values,
+        )
+        self.conn.commit()
+        return self.get(suggestion_id)
+
+    def delete(self, suggestion_id: str) -> bool:
+        cursor = self.conn.execute(
+            "DELETE FROM suggestions WHERE id = ?", (suggestion_id,)
+        )
+        self.conn.commit()
+        return cursor.rowcount > 0
+
+    def count(self, status: str | None = None) -> int:
+        if status:
+            row = self.conn.execute(
+                "SELECT COUNT(*) as cnt FROM suggestions WHERE status = ?", (status,)
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                "SELECT COUNT(*) as cnt FROM suggestions"
+            ).fetchone()
+        return row["cnt"]
+
+    def _row_to_dict(self, row) -> dict:
+        result = dict(row)
+        if result.get("tags"):
+            result["tags"] = json.loads(result["tags"])
+        return result
+
+
+# ─────────────────────────────────────────────────────────────────
+# Rant flow
+# ─────────────────────────────────────────────────────────────────
+
+
 class RantRepo:
     def __init__(self, conn: sqlite3.Connection):
         self.conn = conn

@@ -9,6 +9,7 @@ from blah.agents.tools.base import collect_tools
 from blah.agents.tools.context_tools import ContextTools
 from blah.agents.tools.publish_tools import PublishTools
 from blah.agents.tools.rant_tools import RantTools
+from blah.agents.tools.suggestion_tools import SuggestionTools
 from blah.agents.tools.web_tools import WebTools
 from blah.config.settings import BlahSettings
 from blah.db.repository import PieceRepo, RantRepo
@@ -33,6 +34,7 @@ class RantAgent(BaseAgent):
         self._rant_tools = RantTools(db, rant_id)
         self._context_tools = ContextTools(settings.context_path)
         self._publish_tools = PublishTools(db, settings, rant_id)
+        self._suggestion_tools = SuggestionTools(db, rant_id)
         self._web_tools = WebTools()
 
         # Must call super().__init__ after setting up tool instances
@@ -45,6 +47,8 @@ class RantAgent(BaseAgent):
         for tool_def in collect_tools(self._context_tools):
             self.tool_registry.register(tool_def)
         for tool_def in collect_tools(self._publish_tools):
+            self.tool_registry.register(tool_def)
+        for tool_def in collect_tools(self._suggestion_tools):
             self.tool_registry.register(tool_def)
         for tool_def in collect_tools(self._web_tools):
             self.tool_registry.register(tool_def)
@@ -87,6 +91,8 @@ You help create and refine rants — content for posting across platforms.
 - Use finalize_rant when the user is satisfied and ready to publish
 - Use publish_rant to post approved pieces to platforms (the user can say "post it")
 - Use web_search and fetch_url to research topics and gather context
+- Use list_suggestions to check for queued suggestions the user may want to turn into rants
+- Use convert_suggestion to mark a suggestion as used, or dismiss_suggestion to skip it
 - Use suggest_context_update when you learn something about the user's preferences"""
 
 

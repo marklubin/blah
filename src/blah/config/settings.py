@@ -25,11 +25,11 @@ class PlatformCredentials(BaseModel):
     # Mastodon
     instance: str | None = None
     access_token: str | None = None
-    # Twitter/X (official API for writes)
-    consumer_key: str | None = None
-    consumer_secret: str | None = None
-    access_token_secret: str | None = None
-    # Twitter/X (twitterapi.io for reads - optional)
+    # Twitter/X - OAuth 2.0 (writes via xdk)
+    client_id: str | None = None
+    client_secret: str | None = None
+    oauth2_token: dict | None = None  # {access_token, refresh_token, expires_at, ...}
+    # Twitter/X - twitterapi.io (reads)
     twitterapi_io_key: str | None = None
 
 
@@ -52,6 +52,17 @@ class ModelsConfig(BaseModel):
     conversation: ModelConfig = Field(default_factory=ModelConfig)
 
 
+class QueueConfig(BaseModel):
+    """Configuration for the Cloudflare suggestion queue (KV-backed)."""
+
+    enabled: bool = False
+    account_id: str | None = None
+    kv_namespace_id: str | None = None
+    api_token: str | None = None
+    worker_url: str | None = None
+    worker_token: str | None = None
+
+
 class ContextConfig(BaseModel):
     """Context.md configuration."""
 
@@ -65,6 +76,7 @@ class BlahSettings(BaseSettings):
     blah_home: Path = Field(default_factory=get_blah_home)
     models: ModelsConfig = Field(default_factory=ModelsConfig)
     context: ContextConfig = Field(default_factory=ContextConfig)
+    queue: QueueConfig = Field(default_factory=QueueConfig)
     platforms: dict[str, PlatformCredentials] = Field(default_factory=dict)
 
     @property
@@ -82,6 +94,21 @@ class BlahSettings(BaseSettings):
     @property
     def resources_path(self) -> Path:
         return self.blah_home / "resources"
+
+    def save(self) -> None:
+        """Persist current settings (including refreshed tokens) to config.yaml."""
+        data = {
+            "models": self.models.model_dump(),
+            "context": self.context.model_dump(),
+            "queue": self.queue.model_dump(exclude_none=True),
+            "platforms": {
+                name: creds.model_dump(exclude_none=True)
+                for name, creds in self.platforms.items()
+            },
+        }
+        self.config_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.config_path, "w") as f:
+            yaml.dump(data, f, default_flow_style=False, sort_keys=False)
 
     @classmethod
     def load(cls, blah_home: Path | None = None) -> BlahSettings:

@@ -65,3 +65,31 @@ class PlatformAdapter(ABC):
             reply_to = result.external_id
             results.append(result)
         return results
+
+    def get_timeline(
+        self, limit: int = 50, cursor: str | None = None
+    ) -> dict:
+        """Fetch the authenticated user's home timeline."""
+        return {"items": [], "cursor": None}
+
+    def get_author_feed(
+        self, handle: str, limit: int = 50, cursor: str | None = None
+    ) -> dict:
+        """Fetch recent posts by a specific author."""
+        return {"items": [], "cursor": None}
+
+    def search_posts(self, query: str, limit: int = 25) -> list[dict]:
+        """Search for posts matching a query."""
+        return []
+
+    def get_post_thread(self, uri: str, depth: int = 10) -> dict | None:
+        """Fetch a post and its thread context (parents + replies)."""
+        return None
+
+    def get_profile(self, handle: str) -> dict | None:
+        """Fetch a user profile."""
+        return None
+
+    def follow(self, handle: str) -> bool:
+        """Follow a user. Returns True if successful."""
+        return False

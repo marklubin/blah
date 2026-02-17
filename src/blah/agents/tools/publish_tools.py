@@ -41,21 +41,14 @@ class PublishTools:
 
         # Twitter/X
         twitter = self.settings.platforms.get("twitter")
-        if (
-            twitter
-            and twitter.enabled
-            and twitter.consumer_key
-            and twitter.consumer_secret
-            and twitter.access_token
-            and twitter.access_token_secret
-        ):
+        if twitter and twitter.enabled and twitter.client_id and twitter.oauth2_token:
             logger.info("Initializing Twitter adapter")
             adapter = TwitterAdapter(
-                consumer_key=twitter.consumer_key,
-                consumer_secret=twitter.consumer_secret,
-                access_token=twitter.access_token,
-                access_token_secret=twitter.access_token_secret,
-                twitterapi_io_key=getattr(twitter, "twitterapi_io_key", None),
+                client_id=twitter.client_id,
+                oauth2_token=twitter.oauth2_token,
+                client_secret=twitter.client_secret,
+                twitterapi_io_key=twitter.twitterapi_io_key,
+                settings=self.settings,
             )
             adapter.authenticate()
             self._adapters["twitter"] = adapter
