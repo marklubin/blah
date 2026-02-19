@@ -67,6 +67,9 @@ class BlueskyAdapter(PlatformAdapter):
                     "cid": p.cid,
                     "text": p.record.text,
                     "created_at": str(p.record.created_at) if p.record.created_at else None,
+                    "like_count": p.like_count or 0,
+                    "repost_count": p.repost_count or 0,
+                    "reply_count": p.reply_count or 0,
                 }
         except Exception:
             logger.exception("Failed to fetch post %s", external_id)

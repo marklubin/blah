@@ -23,27 +23,43 @@ class RadarConfigTools:
 
     @tool(
         name="add_source",
-        description="Add a new source to monitor. Types: account (user), timeline (home), search.",
+        description="Add a new source to monitor. Types: account (user), timeline (home), search, subreddit (Reddit only), feed (LinkedIn only), frontpage (HackerNews).",
         parameters={
             "type": "object",
             "properties": {
                 "platform": {
                     "type": "string",
-                    "description": "Platform name: 'bluesky' or 'twitter'",
-                    "enum": ["bluesky", "twitter"],
+                    "description": "Platform name",
+                    "enum": ["bluesky", "twitter", "reddit", "linkedin", "discord", "hackernews", "telegram"],
                 },
                 "source_type": {
                     "type": "string",
-                    "description": "Type of source: 'account', 'timeline', or 'search'",
-                    "enum": ["account", "timeline", "search"],
+                    "description": "Type of source: 'account', 'timeline', 'search', 'subreddit' (Reddit), 'feed' (LinkedIn), 'profile' (LinkedIn), 'channel' (Discord), 'frontpage' (HackerNews)",
+                    "enum": ["account", "timeline", "search", "subreddit", "feed", "profile", "channel", "frontpage"],
                 },
                 "handle": {
                     "type": "string",
-                    "description": "For account type: the user handle (e.g., karpathy.bsky.social)",
+                    "description": "For account/profile type: the user handle",
                 },
                 "query": {
                     "type": "string",
                     "description": "For 'search' type: the search query",
+                },
+                "subreddit": {
+                    "type": "string",
+                    "description": "For 'subreddit' type: the subreddit name (without r/ prefix)",
+                },
+                "channel_id": {
+                    "type": "string",
+                    "description": "For 'channel' type (Discord): the channel ID",
+                },
+                "server_id": {
+                    "type": "string",
+                    "description": "For 'channel' type (Discord): the server/guild ID",
+                },
+                "sort": {
+                    "type": "string",
+                    "description": "For 'frontpage' type (HackerNews): sort order ('top', 'new', 'best', 'ask', 'show', 'job')",
                 },
                 "label": {
                     "type": "string",
@@ -59,6 +75,10 @@ class RadarConfigTools:
         source_type: str,
         handle: str | None = None,
         query: str | None = None,
+        subreddit: str | None = None,
+        channel_id: str | None = None,
+        server_id: str | None = None,
+        sort: str | None = None,
         label: str | None = None,
     ) -> ToolResult:
         # Validate based on type
@@ -72,6 +92,21 @@ class RadarConfigTools:
                 content="Error: 'query' is required for search sources",
                 is_error=True,
             )
+        if source_type == "subreddit" and not subreddit:
+            return ToolResult(
+                content="Error: 'subreddit' is required for subreddit sources",
+                is_error=True,
+            )
+        if source_type == "profile" and not handle:
+            return ToolResult(
+                content="Error: 'handle' is required for profile sources",
+                is_error=True,
+            )
+        if source_type == "channel" and not channel_id:
+            return ToolResult(
+                content="Error: 'channel_id' is required for channel sources",
+                is_error=True,
+            )
 
         # Build config
         config = {}
@@ -79,6 +114,14 @@ class RadarConfigTools:
             config["handle"] = handle
         if query:
             config["query"] = query
+        if subreddit:
+            config["subreddit"] = subreddit
+        if channel_id:
+            config["channel_id"] = channel_id
+        if server_id:
+            config["server_id"] = server_id
+        if sort:
+            config["sort"] = sort
 
         # Generate label if not provided
         if not label:
@@ -88,6 +131,17 @@ class RadarConfigTools:
                 label = f"{platform} timeline"
             elif source_type == "search":
                 label = f'search: "{query}"'
+            elif source_type == "subreddit":
+                label = f"r/{subreddit}"
+            elif source_type == "feed":
+                label = f"{platform} feed"
+            elif source_type == "profile":
+                label = f"{handle} activity"
+            elif source_type == "channel":
+                label = f"#{channel_id} channel"
+            elif source_type == "frontpage":
+                sort = config.get("sort", "top")
+                label = f"HN {sort} stories"
 
         # Store label in config
         config["label"] = label
@@ -212,8 +266,8 @@ class RadarConfigTools:
             "properties": {
                 "platform": {
                     "type": "string",
-                    "description": "Platform to search: 'bluesky' or 'twitter'",
-                    "enum": ["bluesky", "twitter"],
+                    "description": "Platform to search: 'bluesky', 'twitter', 'reddit', or 'hackernews'",
+                    "enum": ["bluesky", "twitter", "reddit", "hackernews"],
                 },
                 "query": {
                     "type": "string",
@@ -267,8 +321,8 @@ class RadarConfigTools:
             "properties": {
                 "platform": {
                     "type": "string",
-                    "description": "Platform: 'bluesky' or 'twitter'",
-                    "enum": ["bluesky", "twitter"],
+                    "description": "Platform: 'bluesky', 'twitter', 'reddit', or 'hackernews'",
+                    "enum": ["bluesky", "twitter", "reddit", "hackernews"],
                 },
                 "handle": {
                     "type": "string",
@@ -318,8 +372,8 @@ class RadarConfigTools:
             "properties": {
                 "platform": {
                     "type": "string",
-                    "description": "Platform: 'bluesky' or 'twitter'",
-                    "enum": ["bluesky", "twitter"],
+                    "description": "Platform: 'bluesky', 'twitter', 'reddit', or 'hackernews'",
+                    "enum": ["bluesky", "twitter", "reddit", "hackernews"],
                 },
                 "handle": {
                     "type": "string",
@@ -602,7 +656,13 @@ class RadarReportTools:
         else:
             platform = "bluesky"
 
-        limit = 300 if platform == "bluesky" else 280
+        char_limits = {
+            "bluesky": 300,
+            "twitter": 280,
+            "reddit": 10000,
+            "linkedin": 1300,
+        }
+        limit = char_limits.get(platform, 280)
         if len(reply_text) > limit:
             msg = f"Reply is {len(reply_text)} chars, exceeds {platform} limit ({limit})"
             return ToolResult(content=f"Error: {msg}", is_error=True)

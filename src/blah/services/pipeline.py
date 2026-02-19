@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 from dataclasses import dataclass, field
 
+import httpx
+
 from blah.adapters.base import PlatformAdapter
 from blah.config.settings import BlahSettings
+from blah.memory.file_provider import FileMemoryProvider
 from blah.db.repository import (
     FeedItemRepo,
+    PieceMetricsRepo,
+    PieceRepo,
     ReportItemRepo,
     ReportRepo,
     SourceRepo,
@@ -73,10 +79,22 @@ class RadarPipeline:
         self._feed_repo = FeedItemRepo(db)
         self._report_repo = ReportRepo(db)
         self._report_item_repo = ReportItemRepo(db)
+        self._piece_repo = PieceRepo(db)
+        self._metrics_repo = PieceMetricsRepo(db)
+
+        # Memory provider
+        memory = FileMemoryProvider(
+            context_path=settings.context_path,
+            memory_json_path=settings.memory_json_path,
+        )
 
         # Services
-        self._triage = TriageService(db, settings)
-        self._research = ResearchService(db, settings, adapters)
+        self._triage = TriageService(db, settings, memory=memory)
+        self._research = ResearchService(db, settings, adapters, memory=memory)
+
+        # Notification endpoint (best-effort, never blocks pipeline)
+        router_port = os.environ.get("ROUTER_PORT", "8080")
+        self._notify_url = f"http://127.0.0.1:{router_port}/notifications/push"
 
     def run(self, skip_poll: bool = False) -> PipelineResult:
         """Run the full pipeline.
@@ -114,6 +132,14 @@ class RadarPipeline:
             result.report_items = report["item_count"]
 
         logger.info("Pipeline complete: %s", result.summary)
+
+        # Best-effort notification
+        if result.report_id:
+            self._notify(
+                "info", f"Report ready: {result.report_items} signals from {len(result.sources_polled)} sources",
+                metadata={"report_id": result.report_id},
+            )
+
         return result
 
     def poll_only(self) -> dict:
@@ -132,6 +158,15 @@ class RadarPipeline:
 
         for source in sources:
             platform = source["platform"]
+
+            # LinkedIn has no API adapter — items are ingested via browser scraping
+            if platform == "linkedin":
+                logger.info(
+                    "Skipping %s source %s (requires browser scraping)",
+                    platform, source["id"][:8],
+                )
+                continue
+
             adapter = self._adapters.get(platform)
             if not adapter:
                 logger.warning(
@@ -150,6 +185,9 @@ class RadarPipeline:
                 )
             except Exception as e:
                 logger.exception("Failed to poll source %s: %s", source["id"], e)
+                self._notify(
+                    "warning", f"Failed to poll {platform} source {source['id'][:8]}: {e}",
+                )
 
         return {"sources": polled_sources, "items_count": total_items}
 
@@ -190,6 +228,30 @@ class RadarPipeline:
             if query:
                 items = adapter.search_posts(query, limit=25)
 
+        elif source_type == "subreddit":
+            # Fetch subreddit feed (Reddit-specific)
+            subreddit = config.get("subreddit")
+            if subreddit and hasattr(adapter, "get_subreddit_feed"):
+                result = adapter.get_subreddit_feed(subreddit, limit=30)
+                items = result.get("items", [])
+
+        elif source_type == "frontpage":
+            # Fetch frontpage stories (HackerNews-specific)
+            sort = config.get("sort", "top")
+            if hasattr(adapter, "get_frontpage"):
+                result = adapter.get_frontpage(sort, limit=30)
+                items = result.get("items", [])
+
+        elif source_type == "channel":
+            # Fetch channel messages (Discord-specific)
+            channel_id = config.get("channel_id")
+            if channel_id and hasattr(adapter, "get_channel_messages"):
+                guild_id = config.get("server_id", "")
+                channel_name = config.get("label", "")
+                items = adapter.get_channel_messages(
+                    channel_id, limit=50, guild_id=guild_id, channel_name=channel_name
+                )
+
         # Store items (with deduplication)
         stored = []
         for item in items:
@@ -220,6 +282,17 @@ class RadarPipeline:
             stored.append(feed_item)
 
         return stored
+
+    def _notify(self, level: str, title: str, body: str | None = None, metadata: dict | None = None) -> None:
+        """Push a notification to the MCP router. Logs failures but doesn't block the pipeline."""
+        try:
+            httpx.post(
+                self._notify_url,
+                json={"level": level, "source": "blah-radar", "title": title, "body": body, "metadata": metadata},
+                timeout=2,
+            )
+        except Exception:
+            logger.warning("Failed to push notification: %s", title, exc_info=True)
 
     def _generate_report(self, sources_polled: list[str]) -> dict:
         """Generate a report from researched items."""
@@ -260,3 +333,59 @@ class RadarPipeline:
         logger.info("Generated report %s with %d items", report["id"][:8], item_count)
 
         return {"id": report["id"], "item_count": item_count}
+
+    def track_published_pieces(self) -> dict:
+        """Fetch engagement metrics for published pieces and store snapshots.
+
+        Returns:
+            dict with "tracked" count and "failed" count
+        """
+        pieces = self._piece_repo.list_published()
+        if not pieces:
+            logger.info("No published pieces to track")
+            return {"tracked": 0, "failed": 0}
+
+        tracked = 0
+        failed = 0
+
+        for piece in pieces:
+            platform = piece.get("platform")
+            external_id = piece.get("external_id")
+
+            if not platform or not external_id:
+                continue
+
+            adapter = self._adapters.get(platform)
+            if not adapter:
+                logger.debug("No adapter for %s, skipping piece %s", platform, piece["id"][:8])
+                continue
+
+            try:
+                post_data = adapter.get_post(external_id)
+                if not post_data:
+                    logger.warning("Could not fetch post %s on %s", external_id, platform)
+                    failed += 1
+                    continue
+
+                self._metrics_repo.create(
+                    piece_id=piece["id"],
+                    platform=platform,
+                    like_count=post_data.get("like_count", 0),
+                    repost_count=post_data.get("repost_count", 0),
+                    reply_count=post_data.get("reply_count", 0),
+                    raw_data=post_data,
+                )
+                tracked += 1
+                logger.info(
+                    "Tracked metrics for piece %s: %d likes, %d reposts, %d replies",
+                    piece["id"][:8],
+                    post_data.get("like_count", 0),
+                    post_data.get("repost_count", 0),
+                    post_data.get("reply_count", 0),
+                )
+            except Exception:
+                logger.exception("Failed to track metrics for piece %s", piece["id"][:8])
+                failed += 1
+
+        logger.info("Piece tracking complete: %d tracked, %d failed", tracked, failed)
+        return {"tracked": tracked, "failed": failed}

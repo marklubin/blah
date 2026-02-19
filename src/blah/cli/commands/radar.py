@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import logging
+import os
+
 import click
 from rich.console import Console
 from rich.table import Table
@@ -11,6 +14,7 @@ from blah.db.connection import get_db, init_db
 from blah.db.repository import FeedItemRepo, ReportRepo, SourceRepo
 
 console = Console()
+logger = logging.getLogger(__name__)
 
 
 def _require_init() -> BlahSettings:
@@ -25,6 +29,9 @@ def _require_init() -> BlahSettings:
 def _get_adapters(settings: BlahSettings) -> dict:
     """Build platform adapters from settings."""
     from blah.adapters.bluesky import BlueskyAdapter
+    from blah.adapters.discord import DiscordAdapter
+    from blah.adapters.hackernews import HackerNewsAdapter
+    from blah.adapters.reddit import RedditAdapter
     from blah.adapters.twitter import TwitterAdapter
 
     adapters = {}
@@ -48,6 +55,66 @@ def _get_adapters(settings: BlahSettings) -> dict:
         )
         adapter.authenticate()
         adapters["twitter"] = adapter
+
+    # Reddit
+    reddit = settings.platforms.get("reddit")
+    if (
+        reddit
+        and reddit.enabled
+        and reddit.reddit_client_id
+        and reddit.reddit_client_secret
+        and reddit.reddit_username
+        and reddit.reddit_password
+    ):
+        adapter = RedditAdapter(
+            client_id=reddit.reddit_client_id,
+            client_secret=reddit.reddit_client_secret,
+            username=reddit.reddit_username,
+            password=reddit.reddit_password,
+        )
+        adapter.authenticate()
+        adapters["reddit"] = adapter
+
+    # Hacker News (public API, no credentials needed)
+    hn = settings.platforms.get("hackernews")
+    if hn and hn.enabled:
+        adapter = HackerNewsAdapter()
+        adapter.authenticate()
+        adapters["hackernews"] = adapter
+
+    # Discord (via MCP router)
+    discord_cfg = settings.platforms.get("discord")
+    if discord_cfg and discord_cfg.enabled:
+        router_port = os.environ.get("ROUTER_PORT", "8080")
+        router_url = f"http://127.0.0.1:{router_port}"
+        adapter = DiscordAdapter(router_url=router_url)
+        try:
+            adapter.authenticate()
+            adapters["discord"] = adapter
+        except Exception:
+            logger.warning("Discord: router unreachable or token invalid", exc_info=True)
+
+    # Telegram
+    telegram_cfg = settings.platforms.get("telegram")
+    if (
+        telegram_cfg
+        and telegram_cfg.enabled
+        and telegram_cfg.telegram_api_id
+        and telegram_cfg.telegram_api_hash
+        and telegram_cfg.telegram_session_string
+    ):
+        from blah.adapters.telegram import TelegramAdapter
+
+        tg_adapter = TelegramAdapter(
+            api_id=telegram_cfg.telegram_api_id,
+            api_hash=telegram_cfg.telegram_api_hash,
+            session_string=telegram_cfg.telegram_session_string,
+        )
+        try:
+            tg_adapter.authenticate()
+            adapters["telegram"] = tg_adapter
+        except Exception:
+            logger.warning("Telegram: auth failed or session expired", exc_info=True)
 
     return adapters
 
@@ -92,10 +159,6 @@ def pull(skip_research: bool, skip_poll: bool):
 
     try:
         adapters = _get_adapters(settings)
-        if not adapters:
-            console.print("[red]No platform adapters configured.[/red]")
-            console.print("[dim]Configure credentials in ~/.blah/config.yaml[/dim]")
-            raise SystemExit(1)
 
         source_repo = SourceRepo(conn)
         sources = source_repo.list_all(enabled_only=True)
@@ -104,12 +167,37 @@ def pull(skip_research: bool, skip_poll: bool):
             console.print("[dim]Use 'blah radar config' to add sources first.[/dim]")
             return
 
+        # Check if we have any API-based adapters (LinkedIn is browser-only)
+        linkedin_sources = [s for s in sources if s["platform"] == "linkedin"]
+        api_sources = [s for s in sources if s["platform"] != "linkedin"]
+        if not adapters and api_sources and not skip_poll:
+            console.print("[red]No platform adapters configured.[/red]")
+            console.print("[dim]Configure credentials in ~/.blah/config.yaml[/dim]")
+            raise SystemExit(1)
+
         console.print("[bold]Running radar pipeline[/bold]")
         console.print(f"  Sources: {len(sources)}")
-        console.print(f"  Platforms: {', '.join(adapters.keys())}\n")
+        if adapters:
+            console.print(f"  Platforms: {', '.join(adapters.keys())}")
+        if linkedin_sources:
+            console.print(f"  LinkedIn sources: {len(linkedin_sources)} (browser scraping)")
+        discord_sources = [s for s in sources if s["platform"] == "discord"]
+        if discord_sources and "discord" in adapters:
+            console.print(f"  Discord sources: {len(discord_sources)} (API via user token)")
+        console.print()
 
         pipeline = RadarPipeline(conn, settings, adapters)
         result = pipeline.run(skip_poll=skip_poll)
+
+        # Track published piece metrics
+        try:
+            metrics = pipeline.track_published_pieces()
+            if metrics["tracked"]:
+                console.print(f"  [green]Tracked[/green] metrics for {metrics['tracked']} published pieces")
+            if metrics["failed"]:
+                console.print(f"  [yellow]Failed[/yellow] to track {metrics['failed']} pieces")
+        except Exception:
+            logger.exception("Failed to track published piece metrics")
 
         # Display results
         if result.items_fetched:
@@ -211,16 +299,31 @@ def radar_status():
             table.add_column("Type")
             table.add_column("Label")
             table.add_column("ID")
+            table.add_column("Notes")
 
             for s in sources:
                 status = "[green]✓[/green]" if s.get("enabled", True) else "[red]✗[/red]"
                 config = s.get("config", {})
+                state = s.get("state", {})
+                notes = ""
+                if s["platform"] == "linkedin":
+                    auth = state.get("auth_status", "unknown")
+                    last_scrape = state.get("last_scrape", "never")
+                    notes = f"auth: {auth}, scraped: {last_scrape}"
+                elif s["platform"] == "discord":
+                    channel_id = config.get("channel_id", "")
+                    server_id = config.get("server_id", "")
+                    if channel_id:
+                        notes = f"channel: {channel_id[:8]}"
+                        if server_id:
+                            notes += f", server: {server_id[:8]}"
                 table.add_row(
                     status,
                     s["platform"],
                     s["type"],
                     config.get("label") or "-",
                     s["id"][:8],
+                    notes,
                 )
             console.print(table)
         console.print()
@@ -326,6 +429,286 @@ def list_reports(show_all: bool):
                 r.get("created_at", "unknown"),
                 r.get("status", "pending"),
                 str(item_count),
+            )
+
+        console.print(table)
+    finally:
+        conn.close()
+
+
+@radar.command("ingest")
+@click.argument("json_file", required=False, type=click.Path(exists=True))
+@click.option("--source-id", default=None, help="Source ID to associate items with")
+@click.option("--platform", default="linkedin", help="Platform name (default: linkedin)")
+def ingest(json_file: str | None, source_id: str | None, platform: str):
+    """Ingest scraped posts from a JSON file or stdin."""
+    import json
+    import sys
+
+    settings = _require_init()
+    conn = init_db(settings.db_path)
+
+    try:
+        # Read JSON from file or stdin
+        if json_file:
+            with open(json_file) as f:
+                data = json.load(f)
+        else:
+            data = json.load(sys.stdin)
+
+        if not isinstance(data, list):
+            console.print("[red]Expected a JSON array of posts[/red]")
+            raise SystemExit(1)
+
+        # Find or create source
+        source_repo = SourceRepo(conn)
+        if not source_id:
+            # Look for an existing feed source for this platform
+            sources = source_repo.list_by_platform(platform)
+            if sources:
+                source_id = sources[0]["id"]
+            else:
+                # Create a default source
+                source = source_repo.create(
+                    platform=platform,
+                    source_type="feed",
+                    config={"label": f"{platform} feed (ingested)"},
+                )
+                source_id = source["id"]
+
+        # Normalize items and add source_id
+        items = []
+        for post in data:
+            items.append({
+                "source_id": source_id,
+                "platform": platform,
+                "external_id": post.get("external_id", ""),
+                "author": post.get("author", ""),
+                "content": post.get("text") or post.get("content", ""),
+                "url": post.get("url", ""),
+            })
+
+        feed_repo = FeedItemRepo(conn)
+        result = feed_repo.create_batch(items)
+
+        console.print(f"[green]Ingested[/green] {result['ingested']} items")
+        if result["skipped"]:
+            console.print(f"[yellow]Skipped[/yellow] {result['skipped']} (duplicates or missing ID)")
+    finally:
+        conn.close()
+
+
+def _check_all_platforms(settings: BlahSettings, source_repo: SourceRepo) -> list[dict]:
+    """Check each known platform's status, credentials, and connectivity."""
+    from blah.adapters.bluesky import BlueskyAdapter
+    from blah.adapters.discord import DiscordAdapter
+    from blah.adapters.hackernews import HackerNewsAdapter
+    from blah.adapters.reddit import RedditAdapter
+    from blah.adapters.twitter import TwitterAdapter
+
+    results = []
+
+    # --- Bluesky ---
+    bsky = settings.platforms.get("bluesky")
+    bsky_enabled = bool(bsky and bsky.enabled)
+    bsky_has_creds = bool(bsky and bsky.handle and bsky.app_password)
+    bsky_connectivity = "[dim]--[/dim]"
+    if bsky_enabled and bsky_has_creds:
+        try:
+            adapter = BlueskyAdapter(handle=bsky.handle, app_password=bsky.app_password)
+            adapter.authenticate()
+            bsky_connectivity = "[green]OK[/green]"
+        except Exception as exc:
+            logger.warning("Bluesky health check failed", exc_info=True)
+            bsky_connectivity = f"[red]FAIL ({exc})[/red]"
+    results.append({
+        "name": "bluesky",
+        "enabled": bsky_enabled,
+        "credentials": "[green]✓[/green]" if bsky_has_creds else "[red]✗[/red]",
+        "connectivity": bsky_connectivity,
+        "sources": len(source_repo.list_by_platform("bluesky")),
+    })
+
+    # --- Twitter ---
+    twitter = settings.platforms.get("twitter")
+    tw_enabled = bool(twitter and twitter.enabled)
+    tw_has_creds = bool(twitter and twitter.client_id and twitter.oauth2_token)
+    tw_connectivity = "[dim]--[/dim]"
+    if tw_enabled and tw_has_creds:
+        try:
+            adapter = TwitterAdapter(
+                client_id=twitter.client_id,
+                oauth2_token=twitter.oauth2_token,
+                client_secret=twitter.client_secret,
+                twitterapi_io_key=twitter.twitterapi_io_key,
+                settings=settings,
+            )
+            adapter.authenticate()
+            tw_connectivity = "[green]OK[/green]"
+        except Exception as exc:
+            logger.warning("Twitter health check failed", exc_info=True)
+            tw_connectivity = f"[red]FAIL ({exc})[/red]"
+    results.append({
+        "name": "twitter",
+        "enabled": tw_enabled,
+        "credentials": "[green]✓[/green]" if tw_has_creds else "[red]✗[/red]",
+        "connectivity": tw_connectivity,
+        "sources": len(source_repo.list_by_platform("twitter")),
+    })
+
+    # --- Reddit ---
+    reddit = settings.platforms.get("reddit")
+    rd_enabled = bool(reddit and reddit.enabled)
+    rd_has_creds = bool(
+        reddit
+        and reddit.reddit_client_id
+        and reddit.reddit_client_secret
+        and reddit.reddit_username
+        and reddit.reddit_password
+    )
+    rd_connectivity = "[dim]--[/dim]"
+    if rd_enabled and rd_has_creds:
+        try:
+            adapter = RedditAdapter(
+                client_id=reddit.reddit_client_id,
+                client_secret=reddit.reddit_client_secret,
+                username=reddit.reddit_username,
+                password=reddit.reddit_password,
+            )
+            adapter.authenticate()
+            rd_connectivity = "[green]OK[/green]"
+        except Exception as exc:
+            logger.warning("Reddit health check failed", exc_info=True)
+            rd_connectivity = f"[red]FAIL ({exc})[/red]"
+    results.append({
+        "name": "reddit",
+        "enabled": rd_enabled,
+        "credentials": "[green]✓[/green]" if rd_has_creds else "[red]✗[/red]",
+        "connectivity": rd_connectivity,
+        "sources": len(source_repo.list_by_platform("reddit")),
+    })
+
+    # --- Hacker News ---
+    hn = settings.platforms.get("hackernews")
+    hn_enabled = bool(hn and hn.enabled)
+    hn_connectivity = "[dim]--[/dim]"
+    if hn_enabled:
+        try:
+            adapter = HackerNewsAdapter()
+            adapter.authenticate()
+            hn_connectivity = "[green]OK[/green]"
+        except Exception as exc:
+            logger.warning("HackerNews health check failed", exc_info=True)
+            hn_connectivity = f"[red]FAIL ({exc})[/red]"
+    results.append({
+        "name": "hackernews",
+        "enabled": hn_enabled,
+        "credentials": "[green]✓[/green]",  # no credentials needed
+        "connectivity": hn_connectivity,
+        "sources": len(source_repo.list_by_platform("hackernews")),
+    })
+
+    # --- Discord ---
+    discord_cfg = settings.platforms.get("discord")
+    dc_enabled = bool(discord_cfg and discord_cfg.enabled)
+    dc_has_creds = bool(dc_enabled)  # just needs ROUTER_PORT env
+    dc_connectivity = "[dim]--[/dim]"
+    if dc_enabled:
+        try:
+            router_port = os.environ.get("ROUTER_PORT", "8080")
+            router_url = f"http://127.0.0.1:{router_port}"
+            adapter = DiscordAdapter(router_url=router_url)
+            adapter.authenticate()
+            dc_connectivity = "[green]OK[/green]"
+        except Exception as exc:
+            logger.warning("Discord health check failed", exc_info=True)
+            dc_connectivity = f"[red]FAIL ({exc})[/red]"
+    results.append({
+        "name": "discord",
+        "enabled": dc_enabled,
+        "credentials": "[green]✓[/green]" if dc_has_creds else "[red]✗[/red]",
+        "connectivity": dc_connectivity,
+        "sources": len(source_repo.list_by_platform("discord")),
+    })
+
+    # --- LinkedIn ---
+    li = settings.platforms.get("linkedin")
+    li_enabled = bool(li and li.enabled)
+    results.append({
+        "name": "linkedin",
+        "enabled": li_enabled,
+        "credentials": "[yellow]n/a[/yellow]",
+        "connectivity": "[yellow]n/a[/yellow]",
+        "sources": len(source_repo.list_by_platform("linkedin")),
+    })
+
+    # --- Telegram ---
+    telegram_cfg = settings.platforms.get("telegram")
+    tg_enabled = bool(telegram_cfg and telegram_cfg.enabled)
+    tg_has_creds = bool(
+        telegram_cfg
+        and telegram_cfg.telegram_api_id
+        and telegram_cfg.telegram_api_hash
+        and telegram_cfg.telegram_session_string
+    )
+    tg_connectivity = "[dim]--[/dim]"
+    if tg_enabled and tg_has_creds:
+        try:
+            from blah.adapters.telegram import TelegramAdapter
+
+            tg_adapter = TelegramAdapter(
+                api_id=telegram_cfg.telegram_api_id,
+                api_hash=telegram_cfg.telegram_api_hash,
+                session_string=telegram_cfg.telegram_session_string,
+            )
+            tg_adapter.authenticate()
+            tg_connectivity = "[green]OK[/green]"
+        except Exception as exc:
+            logger.warning("Telegram health check failed", exc_info=True)
+            tg_connectivity = f"[red]FAIL ({exc})[/red]"
+    results.append({
+        "name": "telegram",
+        "enabled": tg_enabled,
+        "credentials": "[green]✓[/green]" if tg_has_creds else "[red]✗[/red]",
+        "connectivity": tg_connectivity,
+        "sources": len(source_repo.list_by_platform("telegram")),
+    })
+
+    return results
+
+
+def _fmt_bool(value: bool) -> str:
+    """Format a boolean as a colored check/cross."""
+    return "[green]✓[/green]" if value else "[red]✗[/red]"
+
+
+@radar.command("health")
+def radar_health():
+    """Check platform connectivity and configuration status."""
+    settings = _require_init()
+    conn = get_db(settings.db_path)
+
+    try:
+        source_repo = SourceRepo(conn)
+
+        console.print("[bold]Radar Health Check[/bold]\n")
+
+        table = Table(show_header=True, header_style="bold")
+        table.add_column("Platform")
+        table.add_column("Enabled")
+        table.add_column("Credentials")
+        table.add_column("Connectivity")
+        table.add_column("Sources")
+
+        platforms = _check_all_platforms(settings, source_repo)
+
+        for p in platforms:
+            table.add_row(
+                p["name"],
+                _fmt_bool(p["enabled"]),
+                p["credentials"],
+                p["connectivity"],
+                str(p["sources"]),
             )
 
         console.print(table)

@@ -222,6 +222,21 @@ class PieceRepo:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def list_published(self) -> list[dict]:
+        """List pieces that have been published (have an external_id)."""
+        rows = self.conn.execute(
+            "SELECT * FROM pieces WHERE status = 'published' AND external_id IS NOT NULL"
+        ).fetchall()
+        results = []
+        for row in rows:
+            r = dict(row)
+            if r.get("target"):
+                r["target"] = json.loads(r["target"])
+            if r.get("manual_override"):
+                r["manual_override"] = json.loads(r["manual_override"])
+            results.append(r)
+        return results
+
     def count(self) -> int:
         row = self.conn.execute("SELECT COUNT(*) as cnt FROM pieces").fetchone()
         return row["cnt"]
@@ -425,6 +440,38 @@ class FeedItemRepo:
             ).fetchone()
         return row["cnt"]
 
+    def create_batch(self, items: list[dict]) -> dict:
+        """Bulk insert feed items with deduplication.
+
+        Each item dict should have: source_id, platform, external_id, author, content, url
+
+        Returns:
+            dict with "ingested" count and "skipped" count
+        """
+        ingested = 0
+        skipped = 0
+        for item in items:
+            external_id = item.get("external_id")
+            platform = item.get("platform", "linkedin")
+            if not external_id:
+                skipped += 1
+                continue
+            # Check for duplicate
+            existing = self.get_by_external_id(platform, external_id)
+            if existing:
+                skipped += 1
+                continue
+            self.create(
+                source_id=item.get("source_id", ""),
+                platform=platform,
+                external_id=external_id,
+                author=item.get("author", ""),
+                content=item.get("content") or item.get("text", ""),
+                url=item.get("url"),
+            )
+            ingested += 1
+        return {"ingested": ingested, "skipped": skipped}
+
     def _row_to_dict(self, row) -> dict:
         result = dict(row)
         if result.get("enrichment"):
@@ -580,4 +627,56 @@ class ReportItemRepo:
         result = dict(row)
         if result.get("data"):
             result["data"] = json.loads(result["data"])
+        return result
+
+
+# ─────────────────────────────────────────────────────────────────
+# Piece metrics
+# ─────────────────────────────────────────────────────────────────
+
+
+class PieceMetricsRepo:
+    """Repository for piece engagement metrics snapshots."""
+
+    def __init__(self, conn: sqlite3.Connection):
+        self.conn = conn
+
+    def create(
+        self,
+        piece_id: str,
+        platform: str,
+        like_count: int = 0,
+        repost_count: int = 0,
+        reply_count: int = 0,
+        raw_data: dict | None = None,
+    ) -> dict:
+        metric_id = _new_id()
+        self.conn.execute(
+            "INSERT INTO piece_metrics (id, piece_id, platform, like_count, repost_count, reply_count, raw_data) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (metric_id, piece_id, platform, like_count, repost_count, reply_count,
+             json.dumps(raw_data) if raw_data else None),
+        )
+        self.conn.commit()
+        return self.get(metric_id)
+
+    def get(self, metric_id: str) -> dict | None:
+        row = self.conn.execute(
+            "SELECT * FROM piece_metrics WHERE id = ?", (metric_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_dict(row)
+
+    def list_by_piece(self, piece_id: str) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM piece_metrics WHERE piece_id = ? ORDER BY fetched_at DESC",
+            (piece_id,),
+        ).fetchall()
+        return [self._row_to_dict(r) for r in rows]
+
+    def _row_to_dict(self, row) -> dict:
+        result = dict(row)
+        if result.get("raw_data"):
+            result["raw_data"] = json.loads(result["raw_data"])
         return result

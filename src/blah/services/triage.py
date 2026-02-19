@@ -37,9 +37,11 @@ class TriageService:
         db: sqlite3.Connection,
         settings: BlahSettings,
         llm_client: LLMClient | None = None,
+        memory: object | None = None,
     ):
         self._db = db
         self._settings = settings
+        self._memory = memory
         self._feed_repo = FeedItemRepo(db)
 
         # Use provided client or create one with triage model
@@ -188,7 +190,13 @@ Return ONLY the JSON array, no other text."""
             return [(0.0, f"Scoring error: {e}")] * len(items)
 
     def _load_context(self) -> str:
-        """Load context.md content."""
+        """Load context — from memory provider if available, else context.md."""
+        if self._memory is not None:
+            try:
+                ctx = self._memory.get_context()
+                return ctx.to_prompt_text()
+            except Exception:
+                logger.exception("Memory provider failed, falling back to context.md")
         try:
             return self._settings.context_path.read_text()
         except FileNotFoundError:

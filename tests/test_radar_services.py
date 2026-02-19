@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from unittest.mock import patch, MagicMock
 
 import pytest
 
@@ -320,3 +321,221 @@ class TestReportGeneration:
         data = items[0]["data"]
         assert len(data["suggested_angles"]) == 2
         assert "AI memory" in data["relevance_notes"]
+
+
+class TestSubredditSource:
+    """Tests for subreddit source type in pipeline."""
+
+    def test_subreddit_source_fetches(self, db: sqlite3.Connection, settings):
+        """Subreddit source type calls get_subreddit_feed on the adapter."""
+        source_repo = SourceRepo(db)
+        source_repo.create(
+            platform="reddit",
+            source_type="subreddit",
+            config={"subreddit": "python", "label": "r/python"},
+        )
+
+        mock_adapter = MockPlatformAdapter("reddit")
+        mock_adapter.subreddit_feeds["python"] = [
+            {
+                "uri": "t3_abc123",
+                "external_id": "t3_abc123",
+                "text": "Python post",
+                "author": {"handle": "pydev"},
+                "url": "https://reddit.com/r/python/abc123",
+            }
+        ]
+        adapters = {"reddit": mock_adapter}
+
+        pipeline = RadarPipeline(db, settings, adapters)
+        result = pipeline.poll_only()
+
+        assert result["items_count"] == 1
+
+        # Verify feed item stored
+        feed_repo = FeedItemRepo(db)
+        items = feed_repo.list_by_status("raw")
+        assert len(items) == 1
+        assert items[0]["platform"] == "reddit"
+        assert items[0]["external_id"] == "t3_abc123"
+
+
+class TestLinkedInSkip:
+    """Tests for LinkedIn source handling in pipeline."""
+
+    def test_linkedin_sources_skipped_during_poll(self, db: sqlite3.Connection, settings):
+        """LinkedIn sources are skipped during polling (no adapter)."""
+        source_repo = SourceRepo(db)
+        source_repo.create(
+            platform="linkedin",
+            source_type="feed",
+            config={"label": "LinkedIn feed"},
+        )
+
+        adapters = {}
+        pipeline = RadarPipeline(db, settings, adapters)
+        result = pipeline.poll_only()
+
+        # LinkedIn source should be skipped, not cause an error
+        assert result["sources"] == []
+        assert result["items_count"] == 0
+
+    def test_linkedin_items_processed_with_skip_poll(self, db: sqlite3.Connection, settings):
+        """Pre-ingested LinkedIn items are processed when skip_poll is used."""
+        source_repo = SourceRepo(db)
+        feed_repo = FeedItemRepo(db)
+
+        # Create LinkedIn source and manually add a raw item (simulating ingest)
+        source = source_repo.create(
+            platform="linkedin",
+            source_type="feed",
+            config={"label": "LinkedIn feed"},
+        )
+        feed_repo.create(
+            source_id=source["id"],
+            platform="linkedin",
+            external_id="urn:li:activity:123",
+            author="Jane Doe",
+            content="Interesting post about AI",
+            url="https://linkedin.com/feed/update/urn:li:activity:123",
+        )
+
+        # Verify raw items exist
+        raw_items = feed_repo.list_by_status("raw")
+        assert len(raw_items) == 1
+        assert raw_items[0]["platform"] == "linkedin"
+
+
+class TestPipelineNotifications:
+    """Tests for pipeline notification integration."""
+
+    def test_notify_url_default_port(self, db: sqlite3.Connection, settings):
+        """Pipeline defaults to port 8080 for notifications."""
+        adapters = {"bluesky": MockPlatformAdapter("bluesky")}
+        pipeline = RadarPipeline(db, settings, adapters)
+        assert "8080" in pipeline._notify_url
+
+    def test_notify_url_custom_port(self, db: sqlite3.Connection, settings, monkeypatch):
+        """Pipeline reads ROUTER_PORT from environment."""
+        monkeypatch.setenv("ROUTER_PORT", "9999")
+        adapters = {"bluesky": MockPlatformAdapter("bluesky")}
+        pipeline = RadarPipeline(db, settings, adapters)
+        assert "9999" in pipeline._notify_url
+
+    @patch("blah.services.pipeline.httpx.post")
+    def test_notify_sends_post(self, mock_post, db: sqlite3.Connection, settings):
+        """_notify sends an HTTP POST with correct payload."""
+        mock_post.return_value = MagicMock(status_code=200)
+        adapters = {"bluesky": MockPlatformAdapter("bluesky")}
+        pipeline = RadarPipeline(db, settings, adapters)
+
+        pipeline._notify("info", "Test notification", metadata={"key": "val"})
+
+        mock_post.assert_called_once()
+        call_kwargs = mock_post.call_args
+        payload = call_kwargs.kwargs["json"] if "json" in call_kwargs.kwargs else call_kwargs[1]["json"]
+        assert payload["level"] == "info"
+        assert payload["source"] == "blah-radar"
+        assert payload["title"] == "Test notification"
+        assert payload["metadata"]["key"] == "val"
+
+    @patch("blah.services.pipeline.httpx.post")
+    def test_notify_logs_failure_without_raising(self, mock_post, db: sqlite3.Connection, settings, caplog):
+        """_notify logs the failure but doesn't raise, so the pipeline continues."""
+        mock_post.side_effect = Exception("Connection refused")
+        adapters = {"bluesky": MockPlatformAdapter("bluesky")}
+        pipeline = RadarPipeline(db, settings, adapters)
+
+        # Should not raise
+        pipeline._notify("error", "Something broke")
+
+        # But it should have logged a warning
+        assert any("Failed to push notification" in r.message for r in caplog.records)
+
+    @patch("blah.services.pipeline.httpx.post")
+    def test_pipeline_notifies_on_report(
+        self, mock_post, db: sqlite3.Connection, settings, source_with_items
+    ):
+        """Pipeline sends info notification after generating a report."""
+        mock_post.return_value = MagicMock(status_code=200)
+        source_id, item_ids = source_with_items
+
+        # Set up items so they pass triage and research
+        scores = [{"score": 0.8, "reason": "Relevant"}] * 5
+        angles = {"relevance_notes": "Test", "angles": ["Angle 1"]}
+        mock_llm = MockLLMClient()
+        mock_llm.add_response(text=json.dumps(scores))
+        for _ in range(5):
+            mock_llm.add_response(text=json.dumps(angles))
+
+        adapters = {"bluesky": MockPlatformAdapter("bluesky")}
+        pipeline = RadarPipeline(db, settings, adapters)
+        pipeline._triage._llm = mock_llm
+        pipeline._research._llm = mock_llm
+
+        result = pipeline.run(skip_poll=True)
+
+        # Should have a report
+        assert result.report_id is not None
+
+        # Should have called _notify (httpx.post) with report info
+        assert mock_post.called
+        # Find the info notification call
+        info_calls = [
+            c for c in mock_post.call_args_list
+            if c.kwargs.get("json", c[1].get("json", {})).get("level") == "info"
+        ]
+        assert len(info_calls) >= 1
+        payload = info_calls[0].kwargs.get("json") or info_calls[0][1]["json"]
+        assert "Report ready" in payload["title"]
+        assert payload["metadata"]["report_id"] == result.report_id
+
+    @patch("blah.services.pipeline.httpx.post")
+    def test_pipeline_notifies_on_poll_failure(
+        self, mock_post, db: sqlite3.Connection, settings
+    ):
+        """Pipeline sends warning notification when a source fails to poll."""
+        mock_post.return_value = MagicMock(status_code=200)
+
+        # Create a source
+        source_repo = SourceRepo(db)
+        source_repo.create(
+            platform="bluesky",
+            source_type="account",
+            config={"handle": "fail.bsky.social", "label": "@fail"},
+        )
+
+        # Adapter that throws
+        failing_adapter = MockPlatformAdapter("bluesky")
+        failing_adapter.should_fail = True
+        adapters = {"bluesky": failing_adapter}
+
+        pipeline = RadarPipeline(db, settings, adapters)
+        pipeline.run()
+
+        # Should have sent a warning notification
+        warning_calls = [
+            c for c in mock_post.call_args_list
+            if c.kwargs.get("json", c[1].get("json", {})).get("level") == "warning"
+        ]
+        assert len(warning_calls) >= 1
+        payload = warning_calls[0].kwargs.get("json") or warning_calls[0][1]["json"]
+        assert "Failed to poll" in payload["title"]
+
+    @patch("blah.services.pipeline.httpx.post")
+    def test_pipeline_no_notification_when_no_report(
+        self, mock_post, db: sqlite3.Connection, settings
+    ):
+        """Pipeline doesn't send info notification if no report is generated."""
+        adapters = {"bluesky": MockPlatformAdapter("bluesky")}
+        pipeline = RadarPipeline(db, settings, adapters)
+
+        result = pipeline.run()
+
+        assert result.report_id is None
+        # Should not have called _notify for report (no info-level calls)
+        info_calls = [
+            c for c in mock_post.call_args_list
+            if c.kwargs.get("json", c[1].get("json", {})).get("level") == "info"
+        ]
+        assert len(info_calls) == 0

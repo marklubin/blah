@@ -12,6 +12,7 @@ class MockPlatformAdapter(PlatformAdapter):
         self._platform = platform
         self._fail_on_post = fail_on_post
         self._authenticated = False
+        self.should_fail = False  # When True, feed-fetching methods raise
         self.posts: list[PostContent] = []
         self.deleted: list[str] = []
         self.followed: list[str] = []
@@ -23,6 +24,8 @@ class MockPlatformAdapter(PlatformAdapter):
         self.profiles: dict[str, dict] = {}
         self.threads: dict[str, dict] = {}
         self.search_results: list[dict] = []
+        self.subreddit_feeds: dict[str, list[dict]] = {}
+        self.frontpage_feeds: dict[str, list[dict]] = {}
 
     @property
     def platform_name(self) -> str:
@@ -51,7 +54,13 @@ class MockPlatformAdapter(PlatformAdapter):
         return True
 
     def get_post(self, external_id: str) -> dict | None:
-        return {"id": external_id, "text": "mock post"}
+        return {
+            "id": external_id,
+            "text": "mock post",
+            "like_count": 10,
+            "repost_count": 3,
+            "reply_count": 5,
+        }
 
     # Feed fetching methods (for Radar)
 
@@ -66,6 +75,8 @@ class MockPlatformAdapter(PlatformAdapter):
         self, handle: str, limit: int = 50, cursor: str | None = None
     ) -> dict:
         """Return mock author feed."""
+        if self.should_fail:
+            raise ConnectionError("Mock connection failure")
         items = self.author_feeds.get(handle, [])
         return {
             "items": items[:limit],
@@ -97,3 +108,23 @@ class MockPlatformAdapter(PlatformAdapter):
             "description": "Mock profile",
             "followers_count": 100,
         })
+
+    def get_subreddit_feed(
+        self, name: str, sort: str = "hot", limit: int = 30
+    ) -> dict:
+        """Return mock subreddit feed."""
+        items = self.subreddit_feeds.get(name, [])
+        return {
+            "items": items[:limit],
+            "cursor": None,
+        }
+
+    def get_frontpage(
+        self, sort: str = "top", limit: int = 30
+    ) -> dict:
+        """Return mock frontpage feed."""
+        items = self.frontpage_feeds.get(sort, [])
+        return {
+            "items": items[:limit],
+            "cursor": None,
+        }

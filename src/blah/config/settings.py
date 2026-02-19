@@ -31,6 +31,17 @@ class PlatformCredentials(BaseModel):
     oauth2_token: dict | None = None  # {access_token, refresh_token, expires_at, ...}
     # Twitter/X - twitterapi.io (reads)
     twitterapi_io_key: str | None = None
+    # Reddit
+    reddit_client_id: str | None = None
+    reddit_client_secret: str | None = None
+    reddit_username: str | None = None
+    reddit_password: str | None = None
+    # Discord (user token — selfbot)
+    discord_token: str | None = None
+    # Telegram
+    telegram_api_id: int | None = None
+    telegram_api_hash: str | None = None
+    telegram_session_string: str | None = None
 
 
 class ModelConfig(BaseModel):
@@ -90,6 +101,10 @@ class BlahSettings(BaseSettings):
     @property
     def context_path(self) -> Path:
         return self.blah_home / self.context.path
+
+    @property
+    def memory_json_path(self) -> Path:
+        return self.blah_home / "memory.json"
 
     @property
     def resources_path(self) -> Path:

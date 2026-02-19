@@ -160,6 +160,103 @@ class TestRadarConfigTools:
         result = tools.toggle_source(source["id"], True)
         assert "enabled" in result.content
 
+    def test_add_source_subreddit(self, db: sqlite3.Connection):
+        """Can add a subreddit source."""
+        adapters = {"reddit": MockPlatformAdapter("reddit")}
+        tools = RadarConfigTools(db, adapters)
+
+        result = tools.add_source(
+            platform="reddit",
+            source_type="subreddit",
+            subreddit="python",
+        )
+
+        assert not result.is_error
+        data = json.loads(result.content)
+        assert data["success"] is True
+        assert "r/python" in data["message"]
+
+        # Verify in DB
+        source_repo = SourceRepo(db)
+        source = source_repo.get(data["source_id"])
+        assert source["platform"] == "reddit"
+        assert source["type"] == "subreddit"
+        assert source["config"]["subreddit"] == "python"
+
+    def test_add_source_subreddit_requires_name(self, db: sqlite3.Connection):
+        """Subreddit source requires subreddit name."""
+        adapters = {}
+        tools = RadarConfigTools(db, adapters)
+
+        result = tools.add_source(
+            platform="reddit",
+            source_type="subreddit",
+        )
+
+        assert result.is_error
+        assert "subreddit" in result.content.lower()
+
+    def test_add_source_linkedin_feed(self, db: sqlite3.Connection):
+        """Can add a LinkedIn feed source."""
+        adapters = {}
+        tools = RadarConfigTools(db, adapters)
+
+        result = tools.add_source(
+            platform="linkedin",
+            source_type="feed",
+        )
+
+        assert not result.is_error
+        data = json.loads(result.content)
+        assert data["success"] is True
+        assert "linkedin feed" in data["message"].lower()
+
+    def test_add_source_linkedin_profile(self, db: sqlite3.Connection):
+        """Can add a LinkedIn profile source."""
+        adapters = {}
+        tools = RadarConfigTools(db, adapters)
+
+        result = tools.add_source(
+            platform="linkedin",
+            source_type="profile",
+            handle="johndoe",
+        )
+
+        assert not result.is_error
+        data = json.loads(result.content)
+        assert data["success"] is True
+
+    def test_draft_reply_reddit_char_limit(self, db: sqlite3.Connection):
+        """Reddit has a 10000 char limit for replies."""
+        source_repo = SourceRepo(db)
+        feed_repo = FeedItemRepo(db)
+        report_repo = ReportRepo(db)
+        report_item_repo = ReportItemRepo(db)
+
+        source = source_repo.create("reddit", "subreddit", {"subreddit": "python"})
+        feed_item = feed_repo.create(
+            source_id=source["id"],
+            platform="reddit",
+            external_id="t3_test123",
+            author="redditor",
+            content="Test post",
+            url="https://reddit.com/r/python/test123",
+        )
+        report = report_repo.create(sources_polled=[source["id"]])
+        report_item = report_item_repo.create(
+            report_id=report["id"],
+            item_type="signal",
+            data={"feed_item_id": feed_item["id"], "author": "redditor", "content": "Test"},
+            relevance_score=0.9,
+        )
+
+        adapters = {"reddit": MockPlatformAdapter("reddit")}
+        tools = RadarReportTools(db, adapters, report["id"])
+
+        # A 500-char reply should work for Reddit (limit is 10000)
+        result = tools.draft_reply(report_item["id"][:8], "x" * 500)
+        assert not result.is_error
+
 
 class TestRadarReportTools:
     """Tests for RadarReportTools."""
