@@ -6,6 +6,7 @@ import logging
 import os
 
 import click
+import httpx
 from rich.console import Console
 from rich.table import Table
 
@@ -43,18 +44,29 @@ def _get_adapters(settings: BlahSettings) -> dict:
         adapter.authenticate()
         adapters["bluesky"] = adapter
 
-    # Twitter/X
+    # Twitter/X — allow read-only mode with just twitterapi.io key
     twitter = settings.platforms.get("twitter")
-    if twitter and twitter.enabled and twitter.client_id and twitter.oauth2_token:
-        adapter = TwitterAdapter(
-            client_id=twitter.client_id,
-            oauth2_token=twitter.oauth2_token,
-            client_secret=twitter.client_secret,
-            twitterapi_io_key=twitter.twitterapi_io_key,
-            settings=settings,
-        )
-        adapter.authenticate()
-        adapters["twitter"] = adapter
+    if twitter and twitter.enabled:
+        has_oauth = bool(twitter.client_id and twitter.oauth2_token)
+        has_read = bool(twitter.twitterapi_io_key)
+        if has_oauth or has_read:
+            adapter = TwitterAdapter(
+                client_id=twitter.client_id or "",
+                oauth2_token=twitter.oauth2_token or {},
+                client_secret=twitter.client_secret,
+                twitterapi_io_key=twitter.twitterapi_io_key,
+                settings=settings,
+            )
+            if has_oauth:
+                adapter.authenticate()
+            else:
+                # Read-only: set up HTTP client for twitterapi.io only
+                adapter._http_client = httpx.Client(
+                    base_url="https://api.twitterapi.io",
+                    headers={"x-api-key": twitter.twitterapi_io_key},
+                    timeout=30.0,
+                )
+            adapters["twitter"] = adapter
 
     # Reddit
     reddit = settings.platforms.get("reddit")
@@ -85,8 +97,7 @@ def _get_adapters(settings: BlahSettings) -> dict:
     # Discord (via MCP router)
     discord_cfg = settings.platforms.get("discord")
     if discord_cfg and discord_cfg.enabled:
-        router_port = os.environ.get("ROUTER_PORT", "8080")
-        router_url = f"http://127.0.0.1:{router_port}"
+        router_url = os.environ.get("ROUTER_URL") or f"http://127.0.0.1:{os.environ.get('ROUTER_PORT', '8080')}"
         adapter = DiscordAdapter(router_url=router_url)
         try:
             adapter.authenticate()
@@ -167,10 +178,10 @@ def pull(skip_research: bool, skip_poll: bool):
             console.print("[dim]Use 'blah radar config' to add sources first.[/dim]")
             return
 
-        # Check if we have any API-based adapters (LinkedIn is browser-only)
-        linkedin_sources = [s for s in sources if s["platform"] == "linkedin"]
-        api_sources = [s for s in sources if s["platform"] != "linkedin"]
-        if not adapters and api_sources and not skip_poll:
+        # Check which sources have API adapters vs browser-only
+        api_sources = [s for s in sources if s["platform"] in adapters]
+        browser_sources = [s for s in sources if s["platform"] not in adapters]
+        if not adapters and not browser_sources and not skip_poll:
             console.print("[red]No platform adapters configured.[/red]")
             console.print("[dim]Configure credentials in ~/.blah/config.yaml[/dim]")
             raise SystemExit(1)
@@ -178,12 +189,14 @@ def pull(skip_research: bool, skip_poll: bool):
         console.print("[bold]Running radar pipeline[/bold]")
         console.print(f"  Sources: {len(sources)}")
         if adapters:
-            console.print(f"  Platforms: {', '.join(adapters.keys())}")
-        if linkedin_sources:
-            console.print(f"  LinkedIn sources: {len(linkedin_sources)} (browser scraping)")
-        discord_sources = [s for s in sources if s["platform"] == "discord"]
-        if discord_sources and "discord" in adapters:
-            console.print(f"  Discord sources: {len(discord_sources)} (API via user token)")
+            console.print(f"  API platforms: {', '.join(adapters.keys())}")
+        if browser_sources:
+            by_platform = {}
+            for s in browser_sources:
+                by_platform.setdefault(s["platform"], 0)
+                by_platform[s["platform"]] += 1
+            parts = [f"{count} {plat}" for plat, count in by_platform.items()]
+            console.print(f"  Browser-only sources: {', '.join(parts)} (requires agent scraping)")
         console.print()
 
         pipeline = RadarPipeline(conn, settings, adapters)
@@ -436,6 +449,84 @@ def list_reports(show_all: bool):
         conn.close()
 
 
+@radar.command("sync")
+@click.argument("platform")
+def sync_platform(platform: str):
+    """Auto-populate sources from a platform. Currently supports: discord."""
+    settings = _require_init()
+    conn = init_db(settings.db_path)
+
+    try:
+        if platform != "discord":
+            console.print(f"[red]Sync not supported for '{platform}'. Supported: discord[/red]")
+            raise SystemExit(1)
+
+        # Build Discord adapter
+        discord_cfg = settings.platforms.get("discord")
+        if not discord_cfg or not discord_cfg.enabled:
+            console.print("[red]Discord is not enabled in config.yaml[/red]")
+            raise SystemExit(1)
+
+        from blah.adapters.discord import DiscordAdapter
+
+        router_url = os.environ.get("ROUTER_URL") or f"http://127.0.0.1:{os.environ.get('ROUTER_PORT', '8080')}"
+        adapter = DiscordAdapter(router_url=router_url)
+        try:
+            adapter.authenticate()
+        except Exception as exc:
+            console.print(f"[red]Discord auth failed: {exc}[/red]")
+            raise SystemExit(1)
+
+        source_repo = SourceRepo(conn)
+
+        # Get existing Discord sources to avoid duplicates
+        existing_sources = source_repo.list_by_platform("discord")
+        existing_channel_ids = set()
+        for s in existing_sources:
+            cid = s.get("config", {}).get("channel_id")
+            if cid:
+                existing_channel_ids.add(cid)
+
+        guilds = adapter.get_guilds()
+        if not guilds:
+            console.print("[yellow]No Discord servers found.[/yellow]")
+            return
+
+        total_channels = 0
+        created = 0
+        already_existed = 0
+
+        for guild in guilds:
+            channels = adapter.get_guild_channels(guild["id"])
+            for ch in channels:
+                total_channels += 1
+                if ch["id"] in existing_channel_ids:
+                    already_existed += 1
+                    continue
+
+                label = f"#{ch['name']} ({guild['name']})"
+                source_repo.create(
+                    platform="discord",
+                    source_type="channel",
+                    config={
+                        "channel_id": ch["id"],
+                        "server_id": guild["id"],
+                        "label": label,
+                    },
+                )
+                created += 1
+
+        console.print(f"[bold]Discord sync complete[/bold]")
+        console.print(f"  Servers: {len(guilds)}")
+        console.print(f"  Channels found: {total_channels}")
+        console.print(f"  [green]Sources created: {created}[/green]")
+        if already_existed:
+            console.print(f"  [dim]Already existed: {already_existed}[/dim]")
+
+    finally:
+        conn.close()
+
+
 @radar.command("ingest")
 @click.argument("json_file", required=False, type=click.Path(exists=True))
 @click.option("--source-id", default=None, help="Source ID to associate items with")
@@ -508,6 +599,26 @@ def _check_all_platforms(settings: BlahSettings, source_repo: SourceRepo) -> lis
 
     results = []
 
+    # --- Browser (MCP Router) — check first, other platforms reference browser_ok ---
+    router_url = os.environ.get("ROUTER_URL") or f"http://127.0.0.1:{os.environ.get('ROUTER_PORT', '8080')}"
+    browser_ok = False
+    browser_connectivity = "[dim]--[/dim]"
+    try:
+        resp = httpx.get(f"{router_url}/notifications/summary", timeout=5.0)
+        resp.raise_for_status()
+        browser_ok = True
+        browser_connectivity = "[green]OK[/green]"
+    except Exception as exc:
+        logger.warning("Browser/MCP router health check failed", exc_info=True)
+        browser_connectivity = f"[red]FAIL ({exc})[/red]"
+    results.append({
+        "name": "browser (MCP)",
+        "enabled": True,
+        "credentials": "[green]✓[/green]",
+        "connectivity": browser_connectivity,
+        "sources": "-",
+    })
+
     # --- Bluesky ---
     bsky = settings.platforms.get("bluesky")
     bsky_enabled = bool(bsky and bsky.enabled)
@@ -532,26 +643,44 @@ def _check_all_platforms(settings: BlahSettings, source_repo: SourceRepo) -> lis
     # --- Twitter ---
     twitter = settings.platforms.get("twitter")
     tw_enabled = bool(twitter and twitter.enabled)
-    tw_has_creds = bool(twitter and twitter.client_id and twitter.oauth2_token)
+    tw_has_oauth = bool(twitter and twitter.client_id and twitter.oauth2_token)
+    tw_has_read = bool(twitter and twitter.twitterapi_io_key)
+    tw_has_creds = tw_has_oauth or tw_has_read
     tw_connectivity = "[dim]--[/dim]"
+    tw_mode = ""
     if tw_enabled and tw_has_creds:
         try:
-            adapter = TwitterAdapter(
-                client_id=twitter.client_id,
-                oauth2_token=twitter.oauth2_token,
-                client_secret=twitter.client_secret,
-                twitterapi_io_key=twitter.twitterapi_io_key,
-                settings=settings,
-            )
-            adapter.authenticate()
-            tw_connectivity = "[green]OK[/green]"
+            if tw_has_oauth:
+                adapter = TwitterAdapter(
+                    client_id=twitter.client_id,
+                    oauth2_token=twitter.oauth2_token,
+                    client_secret=twitter.client_secret,
+                    twitterapi_io_key=twitter.twitterapi_io_key,
+                    settings=settings,
+                )
+                adapter.authenticate()
+                tw_connectivity = "[green]OK[/green]"
+            else:
+                # Read-only: verify twitterapi.io connectivity
+                resp = httpx.get(
+                    "https://api.twitterapi.io/twitter/user/info",
+                    params={"userName": "x"},
+                    headers={"x-api-key": twitter.twitterapi_io_key},
+                    timeout=10.0,
+                )
+                resp.raise_for_status()
+                tw_connectivity = "[green]OK (read-only)[/green]"
+                tw_mode = " (read-only)"
         except Exception as exc:
             logger.warning("Twitter health check failed", exc_info=True)
             tw_connectivity = f"[red]FAIL ({exc})[/red]"
+    cred_label = "[green]✓[/green]" if tw_has_creds else "[red]✗[/red]"
+    if tw_has_creds and not tw_has_oauth:
+        cred_label = "[green]✓[/green] (read-only)"
     results.append({
         "name": "twitter",
         "enabled": tw_enabled,
-        "credentials": "[green]✓[/green]" if tw_has_creds else "[red]✗[/red]",
+        "credentials": cred_label,
         "connectivity": tw_connectivity,
         "sources": len(source_repo.list_by_platform("twitter")),
     })
@@ -580,12 +709,35 @@ def _check_all_platforms(settings: BlahSettings, source_repo: SourceRepo) -> lis
         except Exception as exc:
             logger.warning("Reddit health check failed", exc_info=True)
             rd_connectivity = f"[red]FAIL ({exc})[/red]"
+    rd_cred_label = "[green]✓[/green]" if rd_has_creds else "[yellow]browser[/yellow]"
+    rd_auth_status = None
+    if rd_enabled and not rd_has_creds and browser_ok:
+        try:
+            auth = _browser_auth_check(
+                router_url,
+                "https://www.reddit.com",
+                logged_in=["Create Post", "karma"],
+                logged_out=["Log In", "Sign Up"],
+            )
+            rd_auth_status = auth.get("auth_status")
+            if rd_auth_status == "logged_in":
+                rd_connectivity = "[green]OK (logged in)[/green]"
+            elif rd_auth_status == "logged_out":
+                rd_connectivity = "[red]NOT LOGGED IN[/red]"
+            else:
+                rd_connectivity = f"[yellow]{rd_auth_status} (browser)[/yellow]"
+        except Exception as exc:
+            logger.warning("Reddit browser auth check failed", exc_info=True)
+            rd_connectivity = f"[red]FAIL ({exc})[/red]"
+    elif rd_enabled and not rd_has_creds:
+        rd_connectivity = "[red]FAIL (router)[/red]"
     results.append({
         "name": "reddit",
         "enabled": rd_enabled,
-        "credentials": "[green]✓[/green]" if rd_has_creds else "[red]✗[/red]",
+        "credentials": rd_cred_label,
         "connectivity": rd_connectivity,
         "sources": len(source_repo.list_by_platform("reddit")),
+        "auth_status": rd_auth_status,
     })
 
     # --- Hacker News ---
@@ -615,8 +767,7 @@ def _check_all_platforms(settings: BlahSettings, source_repo: SourceRepo) -> lis
     dc_connectivity = "[dim]--[/dim]"
     if dc_enabled:
         try:
-            router_port = os.environ.get("ROUTER_PORT", "8080")
-            router_url = f"http://127.0.0.1:{router_port}"
+            router_url = os.environ.get("ROUTER_URL") or f"http://127.0.0.1:{os.environ.get('ROUTER_PORT', '8080')}"
             adapter = DiscordAdapter(router_url=router_url)
             adapter.authenticate()
             dc_connectivity = "[green]OK[/green]"
@@ -634,12 +785,35 @@ def _check_all_platforms(settings: BlahSettings, source_repo: SourceRepo) -> lis
     # --- LinkedIn ---
     li = settings.platforms.get("linkedin")
     li_enabled = bool(li and li.enabled)
+    li_connectivity = "[dim]--[/dim]"
+    li_auth_status = None
+    if li_enabled and browser_ok:
+        try:
+            auth = _browser_auth_check(
+                router_url,
+                "https://www.linkedin.com/feed/",
+                logged_in=["Start a post", "My Network", "Messaging"],
+                logged_out=["Sign in", "Join now"],
+            )
+            li_auth_status = auth.get("auth_status")
+            if li_auth_status == "logged_in":
+                li_connectivity = "[green]OK (logged in)[/green]"
+            elif li_auth_status == "logged_out":
+                li_connectivity = "[red]NOT LOGGED IN[/red]"
+            else:
+                li_connectivity = f"[yellow]{li_auth_status}[/yellow]"
+        except Exception as exc:
+            logger.warning("LinkedIn browser auth check failed", exc_info=True)
+            li_connectivity = f"[red]FAIL ({exc})[/red]"
+    elif li_enabled:
+        li_connectivity = "[red]FAIL (router)[/red]"
     results.append({
         "name": "linkedin",
         "enabled": li_enabled,
-        "credentials": "[yellow]n/a[/yellow]",
-        "connectivity": "[yellow]n/a[/yellow]",
+        "credentials": "[yellow]browser[/yellow]",
+        "connectivity": li_connectivity,
         "sources": len(source_repo.list_by_platform("linkedin")),
+        "auth_status": li_auth_status,
     })
 
     # --- Telegram ---
@@ -677,6 +851,21 @@ def _check_all_platforms(settings: BlahSettings, source_repo: SourceRepo) -> lis
     return results
 
 
+def _browser_auth_check(router_url: str, url: str, logged_in: list[str], logged_out: list[str]) -> dict:
+    """Call the MCP router's browser auth-check endpoint."""
+    resp = httpx.get(
+        f"{router_url}/browser/auth-check",
+        params={
+            "url": url,
+            "logged_in": ",".join(logged_in),
+            "logged_out": ",".join(logged_out),
+        },
+        timeout=25.0,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
 def _fmt_bool(value: bool) -> str:
     """Format a boolean as a colored check/cross."""
     return "[green]✓[/green]" if value else "[red]✗[/red]"
@@ -703,14 +892,34 @@ def radar_health():
         platforms = _check_all_platforms(settings, source_repo)
 
         for p in platforms:
+            sources_str = str(p["sources"]) if isinstance(p["sources"], int) else p["sources"]
             table.add_row(
                 p["name"],
                 _fmt_bool(p["enabled"]),
                 p["credentials"],
                 p["connectivity"],
-                str(p["sources"]),
+                sources_str,
             )
 
         console.print(table)
+
+        # Auto-create LinkedIn feed source if logged in and no sources exist
+        li_result = next((p for p in platforms if p["name"] == "linkedin"), None)
+        if (
+            li_result
+            and li_result["enabled"]
+            and li_result.get("auth_status") == "logged_in"
+            and li_result["sources"] == 0
+        ):
+            from blah.db.connection import init_db as _init_db
+            conn.close()
+            conn = _init_db(settings.db_path)
+            source_repo = SourceRepo(conn)
+            source_repo.create(
+                platform="linkedin",
+                source_type="feed",
+                config={"label": "LinkedIn home feed"},
+            )
+            console.print("\n[green]Auto-created[/green] LinkedIn home feed source.")
     finally:
         conn.close()
