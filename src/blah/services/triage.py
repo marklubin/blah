@@ -50,7 +50,9 @@ class TriageService:
         else:
             model_config = settings.models.triage
             self._llm = LLMClient(
+                provider=model_config.provider,
                 model=model_config.model,
+                base_url=model_config.base_url,
             )
 
     def triage_raw_items(self, limit: int = 100) -> TriageResult:
@@ -160,8 +162,11 @@ Return ONLY the JSON array, no other text."""
                 max_tokens=2000,
             )
 
-            # Parse the response
-            text = response.text.strip()
+            # Parse the response — LLMResponse has .text; Anthropic Message has .content[0].text
+            if hasattr(response, "text") and isinstance(response.text, str):
+                text = response.text.strip()
+            else:
+                text = response.content[0].text.strip()
             # Handle potential markdown code blocks
             if text.startswith("```"):
                 text = text.split("```")[1]

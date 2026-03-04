@@ -49,6 +49,7 @@ class ModelConfig(BaseModel):
 
     provider: str = "anthropic"
     model: str = "claude-sonnet-4-5"
+    base_url: str | None = None
 
 
 class ModelsConfig(BaseModel):

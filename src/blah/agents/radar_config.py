@@ -8,9 +8,13 @@ from blah.adapters.base import PlatformAdapter
 from blah.agents.base import BaseAgent
 from blah.agents.tools.base import collect_tools
 from blah.agents.tools.context_tools import ContextTools
+from blah.agents.tools.discord_browser_tools import DiscordBrowserTools
 from blah.agents.tools.discord_tools import DiscordTools
+from blah.agents.tools.hackernews_browser_tools import HackerNewsBrowserTools
 from blah.agents.tools.linkedin_tools import LinkedInTools
 from blah.agents.tools.radar_tools import RadarConfigTools
+from blah.agents.tools.reddit_browser_tools import RedditBrowserTools
+from blah.agents.tools.twitter_browser_tools import TwitterBrowserTools
 from blah.agents.tools.web_tools import WebTools
 from blah.config.settings import BlahSettings
 from blah.db.repository import SourceRepo
@@ -36,6 +40,10 @@ class RadarConfigAgent(BaseAgent):
         self._web_tools = WebTools()
         self._linkedin_tools = LinkedInTools(db)
         self._discord_tools = DiscordTools(db, adapter=adapters.get("discord"))
+        self._reddit_browser_tools = RedditBrowserTools(db)
+        self._hackernews_browser_tools = HackerNewsBrowserTools(db)
+        self._twitter_browser_tools = TwitterBrowserTools(db)
+        self._discord_browser_tools = DiscordBrowserTools(db)
 
         super().__init__(llm_client, db, settings)
 
@@ -50,14 +58,23 @@ class RadarConfigAgent(BaseAgent):
             self.tool_registry.register(tool_def)
         for tool_def in collect_tools(self._discord_tools):
             self.tool_registry.register(tool_def)
+        for tool_def in collect_tools(self._reddit_browser_tools):
+            self.tool_registry.register(tool_def)
+        for tool_def in collect_tools(self._hackernews_browser_tools):
+            self.tool_registry.register(tool_def)
+        for tool_def in collect_tools(self._twitter_browser_tools):
+            self.tool_registry.register(tool_def)
+        for tool_def in collect_tools(self._discord_browser_tools):
+            self.tool_registry.register(tool_def)
 
     def system_prompt(self) -> str:
         context_md = self._load_context()
         sources = self._source_repo.list_all()
         available_platforms = list(self._adapters.keys())
-        # LinkedIn is always available (browser-based, no adapter needed)
-        if "linkedin" not in available_platforms:
-            available_platforms.append("linkedin")
+        # Browser-only platforms are always available (no API adapter needed)
+        for browser_platform in ("linkedin", "reddit", "twitter", "hackernews", "discord"):
+            if browser_platform not in available_platforms:
+                available_platforms.append(browser_platform)
 
         source_state = _format_sources(sources) if sources else "No sources configured yet."
 
@@ -90,19 +107,25 @@ You help configure what feeds and accounts to monitor for relevant signals.
 - **channel**: Monitor a specific channel's messages — Discord and Telegram
 
 ## Platform Notes
-- **Bluesky/Twitter**: Polled automatically via API when you run `blah radar pull`
-- **Reddit**: Polled automatically via API. Subreddit sources use `get_subreddit_feed`
+- **Bluesky**: Polled automatically via API when you run `blah radar pull`
+- **Twitter**: Polled automatically via API. Browser fallback available if API creds missing.
+- **Reddit**: Polled automatically via API if credentials configured. Browser fallback available otherwise.
 - **LinkedIn**: No public API. Sources are scraped via browser by Claude, then ingested.
   Use `check_linkedin_auth` to verify browser session, `get_scrape_instructions` for scraping guides,
   and `store_linkedin_items` to save scraped data. Then `blah radar pull --skip-poll` processes them.
-  **IMPORTANT**: Always use the MCP router browser tools (`mcp__claude_ai_router__browser_*`) for LinkedIn —
-  NOT the `browser-use` tools. The router browser has the persistent logged-in LinkedIn session.
+- **Hacker News**: Polled automatically via API (public, no creds). Browser fallback also available.
 - **Telegram**: Polled automatically via API. Uses Telethon with a StringSession.
   Run `python scripts/telegram_auth.py` to generate a session string.
   Channel sources use `get_channel_messages`. Channel username goes in `channel_id` field.
 - **Discord**: Polled automatically via API using a user token. Use `list_discord_servers` and
   `list_discord_channels` to discover servers/channels, then add channel sources.
-  `store_discord_items` is available as a manual ingestion fallback if needed.
+  Browser fallback available if API token expires.
+
+**Browser Fallback**: For any platform without working API credentials, you can scrape via browser.
+Use `check_{{platform}}_auth` to verify the browser session, `get_{{platform}}_scrape_instructions`
+for step-by-step instructions, and `store_{{platform}}_items` to save scraped data.
+**IMPORTANT**: Always use the MCP router browser tools (`mcp__claude_ai_mcp-router__browser_*`) —
+NOT browser-use tools. The router browser has the persistent logged-in sessions.
 
 ## Discovery Tools
 - **web_search**: Search the web to find interesting people/topics
@@ -121,6 +144,12 @@ You help configure what feeds and accounts to monitor for relevant signals.
 - **list_discord_channels**: List channels in a Discord server
 - **store_discord_items**: Store Discord messages manually (fallback)
 - **get_discord_sources**: List configured Discord sources
+
+## Browser Fallback Tools (all platforms)
+- **check_reddit_auth** / **get_reddit_scrape_instructions** / **store_reddit_items** / **get_reddit_sources**: Reddit browser scraping
+- **check_hackernews_auth** / **get_hackernews_scrape_instructions** / **store_hackernews_items** / **get_hackernews_sources**: HN browser scraping
+- **check_twitter_auth** / **get_twitter_scrape_instructions** / **store_twitter_items** / **get_twitter_sources**: Twitter/X browser scraping
+- **check_discord_auth** / **get_discord_scrape_instructions**: Discord browser fallback (uses existing store_discord_items)
 
 ## Guidelines
 - Start by understanding what the user wants to track

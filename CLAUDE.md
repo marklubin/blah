@@ -11,6 +11,19 @@ Blah is a CLI tool with two main flows:
 
 All interactions are chat-based with persistent agents. You talk to agents, they do the work.
 
+## Related Project: Synix Kernel & CDR Model
+
+Blah's author also builds [Synix Kernel](../synix_kernel) — a self-organizing multi-agent system grounded in the **CDR (Compress, Divide, Renew)** framework. CDR is relevant context for content and engagement:
+
+**CDR in brief**: A formal framework proving that any bounded-resource system processing unbounded input streams must satisfy three properties or degrade:
+1. **Compress** — Information loss is irreversible; the only choice is *which* information to lose
+2. **Divide** — Timescale-matched partitions strictly outperform monolithic encoders (a perturbation damages one partition, not all timescales)
+3. **Renew** — Every compression scheme has a finite optimal lifespan; renew when instantaneous degradation equals long-run average cost
+
+**Key implications for discourse**: CDR argues against monolithic knowledge graphs — biological memory models (hippocampal replay, mycelium networks, songlines) all point to distributed, dynamic, context-dependent representations, not static node-edge structures. The system achieves persistent operation through continuous renewal, not equilibrium. Graphs flatten multidimensional relationships into typed edges and scale poorly (superlinear edge growth, NP-hard subgraph matching, unsolved semantic consistency).
+
+**Synix implements CDR as**: local cost-based pressure decisions → emergent colony morphology, specialist/generalist oscillation, pollution-driven division, senescence renewal. No global controller. See `../synix_kernel/docs/protocol/` for full specs.
+
 ## Key Concepts
 
 - **Rant**: A topic you want to make noise about. Contains pieces for each platform.

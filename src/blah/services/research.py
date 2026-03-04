@@ -67,7 +67,9 @@ class ResearchService:
         else:
             model_config = settings.models.research
             self._llm = LLMClient(
+                provider=model_config.provider,
                 model=model_config.model,
+                base_url=model_config.base_url,
             )
 
     def research_triaged_items(self, limit: int = 20) -> ResearchResult:
@@ -211,7 +213,11 @@ Return ONLY the JSON, no other text."""
                 max_tokens=1000,
             )
 
-            text = response.text.strip()
+            # LLMResponse has .text; Anthropic Message has .content[0].text
+            if hasattr(response, "text") and isinstance(response.text, str):
+                text = response.text.strip()
+            else:
+                text = response.content[0].text.strip()
             # Handle markdown code blocks
             if text.startswith("```"):
                 text = text.split("```")[1]

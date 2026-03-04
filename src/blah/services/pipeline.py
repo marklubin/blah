@@ -93,8 +93,8 @@ class RadarPipeline:
         self._research = ResearchService(db, settings, adapters, memory=memory)
 
         # Notification endpoint (best-effort, never blocks pipeline)
-        router_port = os.environ.get("ROUTER_PORT", "8080")
-        self._notify_url = f"http://127.0.0.1:{router_port}/notifications/push"
+        router_url = os.environ.get("ROUTER_URL") or f"http://127.0.0.1:{os.environ.get('ROUTER_PORT', '8080')}"
+        self._notify_url = f"{router_url}/notifications/push"
 
     def run(self, skip_poll: bool = False) -> PipelineResult:
         """Run the full pipeline.
@@ -159,19 +159,12 @@ class RadarPipeline:
         for source in sources:
             platform = source["platform"]
 
-            # LinkedIn has no API adapter — items are ingested via browser scraping
-            if platform == "linkedin":
+            # Platforms without API adapters are scraped via browser by the agent
+            adapter = self._adapters.get(platform)
+            if not adapter:
                 logger.info(
                     "Skipping %s source %s (requires browser scraping)",
                     platform, source["id"][:8],
-                )
-                continue
-
-            adapter = self._adapters.get(platform)
-            if not adapter:
-                logger.warning(
-                    "No adapter for platform '%s', skipping source %s",
-                    platform, source["id"],
                 )
                 continue
 
