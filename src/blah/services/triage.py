@@ -55,7 +55,7 @@ class TriageService:
                 base_url=model_config.base_url,
             )
 
-    def triage_raw_items(self, limit: int = 100) -> TriageResult:
+    def triage_raw_items(self, limit: int = 1000) -> TriageResult:
         """Triage all raw items, updating their status."""
         items = self._feed_repo.list_by_status("raw", limit=limit)
         if not items:

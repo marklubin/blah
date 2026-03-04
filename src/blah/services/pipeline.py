@@ -290,7 +290,7 @@ class RadarPipeline:
     def _generate_report(self, sources_polled: list[str]) -> dict:
         """Generate a report from researched items."""
         # Get all researched items not yet in a report
-        items = self._feed_repo.list_by_status("researched", limit=50)
+        items = self._feed_repo.list_by_status("researched", limit=500)
 
         if not items:
             logger.info("No researched items for report")

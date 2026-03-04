@@ -72,7 +72,7 @@ class ResearchService:
                 base_url=model_config.base_url,
             )
 
-    def research_triaged_items(self, limit: int = 20) -> ResearchResult:
+    def research_triaged_items(self, limit: int = 200) -> ResearchResult:
         """Research all triaged items, updating their enrichment."""
         items = self._feed_repo.list_by_status("triaged", limit=limit)
         if not items:
