@@ -77,10 +77,11 @@ class LLMClient:
 
         logger.info("LLMClient initialized: provider=%s model=%s base_url=%s", provider, self.model, base_url)
 
-    def warmup(self, timeout: float = 300.0, interval: float = 5.0) -> bool:
+    def warmup(self, timeout: float = 600.0, interval: float = 10.0) -> bool:
         """Send a minimal request to warm up the endpoint.
 
         Retries until the endpoint responds or timeout is reached.
+        Modal cold starts can take 3-5 minutes (container boot + model load).
         No-op for Anthropic (always available). Returns True if ready.
         """
         if self.provider != "openai":
@@ -104,7 +105,7 @@ class LLMClient:
                         "Content-Type": "application/json",
                         "Authorization": f"Bearer {self._api_key}",
                     },
-                    timeout=60.0,
+                    timeout=120.0,
                 )
                 resp.raise_for_status()
                 elapsed = time.monotonic() - start
