@@ -119,11 +119,10 @@ class RadarPipeline:
         result.items_passed = len(triage_result.passed)
         result.items_discarded = len(triage_result.discarded)
 
-        # 3. Research triaged items
-        if result.items_passed > 0:
-            research_result = self._research.research_triaged_items()
-            result.items_researched = len(research_result.researched)
-            result.research_failed = len(research_result.failed)
+        # 3. Research triaged items (includes any leftover from prior runs)
+        research_result = self._research.research_triaged_items()
+        result.items_researched = len(research_result.researched)
+        result.research_failed = len(research_result.failed)
 
         # 4. Generate report from researched items
         if result.items_researched > 0:
