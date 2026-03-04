@@ -183,12 +183,23 @@ class RadarPipeline:
 
         return {"sources": polled_sources, "items_count": total_items}
 
+    # Default fetch limits per source type
+    _DEFAULT_LIMITS: dict[str, int] = {
+        "frontpage": 15,
+        "timeline": 30,
+        "search": 15,
+        "account": 20,
+        "subreddit": 20,
+        "channel": 50,
+    }
+
     def _fetch_source(self, source: dict, adapter: PlatformAdapter) -> list[dict]:
         """Fetch items from a single source."""
         source_type = source.get("type")
         config = source.get("config", {})
         state = source.get("state", {})
         cursor = state.get("cursor")
+        fetch_limit = config.get("max_items", self._DEFAULT_LIMITS.get(source_type, 30))
 
         items = []
 
@@ -196,7 +207,7 @@ class RadarPipeline:
             # Fetch author's feed
             handle = config.get("handle")
             if handle:
-                result = adapter.get_author_feed(handle, limit=30, cursor=cursor)
+                result = adapter.get_author_feed(handle, limit=fetch_limit, cursor=cursor)
                 items = result.get("items", [])
                 new_cursor = result.get("cursor")
                 if new_cursor:
@@ -206,7 +217,7 @@ class RadarPipeline:
 
         elif source_type == "timeline":
             # Fetch home timeline
-            result = adapter.get_timeline(limit=50, cursor=cursor)
+            result = adapter.get_timeline(limit=fetch_limit, cursor=cursor)
             items = result.get("items", [])
             new_cursor = result.get("cursor")
             if new_cursor:
@@ -218,20 +229,20 @@ class RadarPipeline:
             # Search for posts
             query = config.get("query")
             if query:
-                items = adapter.search_posts(query, limit=25)
+                items = adapter.search_posts(query, limit=fetch_limit)
 
         elif source_type == "subreddit":
             # Fetch subreddit feed (Reddit-specific)
             subreddit = config.get("subreddit")
             if subreddit and hasattr(adapter, "get_subreddit_feed"):
-                result = adapter.get_subreddit_feed(subreddit, limit=30)
+                result = adapter.get_subreddit_feed(subreddit, limit=fetch_limit)
                 items = result.get("items", [])
 
         elif source_type == "frontpage":
             # Fetch frontpage stories (HackerNews-specific)
             sort = config.get("sort", "top")
             if hasattr(adapter, "get_frontpage"):
-                result = adapter.get_frontpage(sort, limit=30)
+                result = adapter.get_frontpage(sort, limit=fetch_limit)
                 items = result.get("items", [])
 
         elif source_type == "channel":
@@ -241,7 +252,7 @@ class RadarPipeline:
                 guild_id = config.get("server_id", "")
                 channel_name = config.get("label", "")
                 items = adapter.get_channel_messages(
-                    channel_id, limit=50, guild_id=guild_id, channel_name=channel_name
+                    channel_id, limit=fetch_limit, guild_id=guild_id, channel_name=channel_name
                 )
 
         # Store items (with deduplication)

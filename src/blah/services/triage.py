@@ -14,7 +14,7 @@ from blah.llm.client import LLMClient, LLMResponse
 logger = logging.getLogger(__name__)
 
 # Score threshold for passing triage
-TRIAGE_THRESHOLD = 0.3
+TRIAGE_THRESHOLD = 0.5
 
 # Batch size for triage calls
 BATCH_SIZE = 20
@@ -130,7 +130,7 @@ class TriageService:
     def _build_score_prompt(self, items: list[dict], context: str) -> str:
         """Build the scoring prompt for a batch of items."""
         items_text = "\n\n".join(
-            f"[Item {i+1}]\n"
+            f"[Item {i+1}] ({item.get('platform', 'unknown')})\n"
             f"Author: {item.get('author', 'unknown')}\n"
             f"Content: {item.get('content', '')[:500]}"
             for i, item in enumerate(items)
@@ -149,16 +149,23 @@ For each item, provide:
 1. A relevance score from 0.0 to 1.0
 2. A brief reason (1 sentence)
 
-Score based on:
-- Topic match with user interests
-- Author relevance (are they someone the user follows or should know?)
-- Engagement potential (would user want to respond?)
+Score strictly on a continuous 0.0-1.0 scale:
+- 0.0-0.2: Off-topic, no connection to user's interests
+- 0.3-0.4: Tangential — vaguely related but no engagement opportunity
+- 0.5-0.6: Relevant topic but generic — user could engage but wouldn't stand out
+- 0.7-0.8: Directly relevant — clear engagement opportunity matching user's expertise
+- 0.9-1.0: High-value signal — user has unique insight to contribute, high-visibility thread
+
+Be discriminating. Most items should score below 0.5. Only items where the user
+has something specific and valuable to add should score 0.7+.
+
+Use the full continuous range (e.g. 0.35, 0.62, 0.74) — do NOT round to fixed values.
 
 ## Output Format
 Return a JSON array with one object per item:
 [
-  {{"score": 0.8, "reason": "Directly addresses AI memory architecture"}},
-  {{"score": 0.2, "reason": "Off-topic, about cooking"}},
+  {{"score": 0.82, "reason": "Directly addresses AI memory architecture, user has CDR framework insight"}},
+  {{"score": 0.15, "reason": "Off-topic, about cooking"}},
   ...
 ]
 
