@@ -5,14 +5,13 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
 from blah.adapters.base import PlatformAdapter
 from blah.config.settings import BlahSettings
 from blah.db.repository import FeedItemRepo
-from blah.llm.client import LLMClient
+from blah.llm.client import LLMClient, LLMResponse
 
 logger = logging.getLogger(__name__)
 
@@ -63,24 +62,15 @@ class ResearchService:
         self._memory = memory
         self._feed_repo = FeedItemRepo(db)
 
-        # Store config for creating per-thread LLM clients
         if llm_client:
             self._llm = llm_client
-            self._llm_config = {
-                "provider": llm_client.provider,
-                "model": llm_client.model,
-                "base_url": llm_client.base_url,
-            }
         else:
             model_config = settings.models.research
-            self._llm_config = {
-                "provider": model_config.provider,
-                "model": model_config.model,
-                "base_url": model_config.base_url,
-            }
-            self._llm = LLMClient(**self._llm_config)
-
-        self._thread_local = threading.local()
+            self._llm = LLMClient(
+                provider=model_config.provider,
+                model=model_config.model,
+                base_url=model_config.base_url,
+            )
 
     def research_triaged_items(self, limit: int = 200) -> ResearchResult:
         """Research all triaged items, updating their enrichment."""
@@ -95,46 +85,77 @@ class ResearchService:
     def research_item(self, item: dict, context: str) -> Enrichment | None:
         """Research a single item and return enrichment."""
         try:
-            enrichment = self._enrich_item(item, context)
+            enrichment = self._fetch_context(item)
+            prompt = self._build_angles_prompt(item, enrichment, context)
+            responses = self._llm.batch_chat([
+                {"messages": [{"role": "user", "content": prompt}], "max_tokens": 1000}
+            ])
+            angles = self._parse_angles(responses[0])
+            enrichment.suggested_angles = angles.get("angles", [])
+            enrichment.relevance_notes = angles.get("relevance_notes", "")
             return enrichment
         except Exception as e:
             logger.exception("Failed to research item %s: %s", item["id"], e)
             return None
 
     def _research_items(self, items: list[dict], context: str) -> ResearchResult:
-        """Research a list of items concurrently."""
+        """Research items: concurrent I/O fetch, then batch LLM inference."""
         researched = []
         failed = []
         max_workers = self._settings.concurrency.research_workers
 
+        # Phase 1: Fetch thread + author context concurrently (platform I/O)
+        enrichments: dict[str, Enrichment] = {}
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             future_to_item = {
-                pool.submit(self._enrich_item, item, context): item
+                pool.submit(self._fetch_context, item): item
                 for item in items
             }
             for future in as_completed(future_to_item):
                 item = future_to_item[future]
                 try:
-                    enrichment = future.result()
-
-                    # DB write on main thread (serialized)
-                    self._feed_repo.update(
-                        item["id"],
-                        status="researched",
-                        enrichment=enrichment.to_dict(),
-                    )
-
-                    item["enrichment"] = enrichment.to_dict()
-                    researched.append(item)
-                    logger.info(
-                        "Researched item %s: %d angles suggested",
-                        item["id"][:8],
-                        len(enrichment.suggested_angles),
-                    )
-
+                    enrichments[item["id"]] = future.result()
                 except Exception as e:
-                    logger.exception("Failed to research item %s: %s", item["id"], e)
+                    logger.exception("Failed to fetch context for %s: %s", item["id"], e)
                     failed.append(item)
+
+        # Phase 2: Batch LLM inference for engagement angles
+        items_to_research = [item for item in items if item["id"] in enrichments]
+        if not items_to_research:
+            logger.info("No items with context to research")
+            return ResearchResult(researched=researched, failed=failed, total=len(items))
+
+        requests = []
+        for item in items_to_research:
+            enrichment = enrichments[item["id"]]
+            prompt = self._build_angles_prompt(item, enrichment, context)
+            requests.append({"messages": [{"role": "user", "content": prompt}], "max_tokens": 1000})
+
+        logger.info("Sending %d research prompts via batch_chat", len(requests))
+        responses = self._llm.batch_chat(requests)
+
+        for item, response in zip(items_to_research, responses):
+            enrichment = enrichments[item["id"]]
+            try:
+                angles = self._parse_angles(response)
+                enrichment.suggested_angles = angles.get("angles", [])
+                enrichment.relevance_notes = angles.get("relevance_notes", "")
+
+                self._feed_repo.update(
+                    item["id"],
+                    status="researched",
+                    enrichment=enrichment.to_dict(),
+                )
+                item["enrichment"] = enrichment.to_dict()
+                researched.append(item)
+                logger.info(
+                    "Researched item %s: %d angles suggested",
+                    item["id"][:8],
+                    len(enrichment.suggested_angles),
+                )
+            except Exception as e:
+                logger.exception("Failed to research item %s: %s", item["id"], e)
+                failed.append(item)
 
         logger.info(
             "Research complete: %d researched, %d failed",
@@ -144,14 +165,12 @@ class ResearchService:
             researched=researched, failed=failed, total=len(items)
         )
 
-    def _enrich_item(self, item: dict, context: str) -> Enrichment:
-        """Enrich a single item with full context and suggested angles."""
+    def _fetch_context(self, item: dict) -> Enrichment:
+        """Fetch thread and author context from platform APIs."""
         platform = item.get("platform", "bluesky")
         adapter = self._adapters.get(platform)
-
         enrichment = Enrichment()
 
-        # 1. Fetch full thread context
         if adapter and item.get("external_id"):
             try:
                 thread = adapter.get_post_thread(item["external_id"])
@@ -160,15 +179,12 @@ class ResearchService:
             except Exception as e:
                 logger.warning("Could not fetch thread: %s", e)
 
-        # 2. Fetch author context
         author_handle = self._extract_author_handle(item)
         if adapter and author_handle:
             try:
                 profile = adapter.get_profile(author_handle)
                 if profile:
                     enrichment.author_context = self._format_author(profile)
-
-                # Get recent posts from author
                 recent = adapter.get_author_feed(author_handle, limit=5)
                 if recent and recent.get("items"):
                     enrichment.related_posts = [
@@ -177,24 +193,13 @@ class ResearchService:
             except Exception as e:
                 logger.warning("Could not fetch author info: %s", e)
 
-        # 3. Generate suggested angles using LLM
-        angles = self._generate_angles(item, enrichment, context)
-        enrichment.suggested_angles = angles.get("angles", [])
-        enrichment.relevance_notes = angles.get("relevance_notes", "")
-
         return enrichment
 
-    def _get_thread_llm(self) -> LLMClient:
-        """Get a per-thread LLM client to avoid connection pool contention."""
-        if not hasattr(self._thread_local, "llm"):
-            self._thread_local.llm = LLMClient(**self._llm_config)
-        return self._thread_local.llm
-
-    def _generate_angles(
+    def _build_angles_prompt(
         self, item: dict, enrichment: Enrichment, context: str
-    ) -> dict:
-        """Generate suggested engagement angles using LLM."""
-        prompt = f"""You are helping someone decide how to engage with a social media post.
+    ) -> str:
+        """Build the engagement angles prompt."""
+        return f"""You are helping someone decide how to engage with a social media post.
 
 ## Who You're Helping (their context)
 {context}
@@ -230,52 +235,33 @@ Return JSON:
 
 Return ONLY the JSON, no other text."""
 
-        try:
-            llm = self._get_thread_llm()
-            response = llm.chat(
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=1000,
-            )
+    def _parse_angles(self, response: LLMResponse) -> dict:
+        """Parse LLM response into angles dict."""
+        text = response.text.strip()
 
-            # LLMResponse has .text; Anthropic Message has .content[0].text
-            if hasattr(response, "text") and isinstance(response.text, str):
-                text = response.text.strip()
-            else:
-                text = response.content[0].text.strip()
-            # Handle markdown code blocks
-            if text.startswith("```"):
-                text = text.split("```")[1]
-                if text.startswith("json"):
-                    text = text[4:]
-                text = text.strip()
+        if text.startswith("```"):
+            text = text.split("```")[1]
+            if text.startswith("json"):
+                text = text[4:]
+            text = text.strip()
 
-            return json.loads(text)
-
-        except Exception as e:
-            logger.exception("Failed to generate angles: %s", e)
-            return {
-                "relevance_notes": f"Research error: {e}",
-                "angles": [],
-            }
+        return json.loads(text)
 
     def _format_thread(self, thread: dict) -> str:
         """Format a thread dict into readable text."""
         parts = []
 
-        # Add parents (conversation leading to this post)
         for parent in thread.get("parents", []):
             author = parent.get("author", {}).get("handle", "unknown")
             text = parent.get("text", "")
             parts.append(f"@{author}: {text}")
 
-        # Add the main post
         post = thread.get("post", {})
         if post:
             author = post.get("author", {}).get("handle", "unknown")
             text = post.get("text", "")
-            parts.append(f">>> @{author}: {text}")  # Highlight main post
+            parts.append(f">>> @{author}: {text}")
 
-        # Add a few replies for context
         for reply in thread.get("replies", [])[:3]:
             author = reply.get("author", {}).get("handle", "unknown")
             text = reply.get("text", "")
@@ -301,7 +287,6 @@ Return ONLY the JSON, no other text."""
         author = item.get("author")
         if isinstance(author, dict):
             return author.get("handle")
-        # Could be "handle" or "did:plc:xxx"
         if isinstance(author, str) and not author.startswith("did:"):
             return author
         return None

@@ -68,56 +68,16 @@ class LLMClient:
             # If base_url ends with /v1, append /chat/completions; otherwise use as-is
             if base_url and base_url.rstrip("/").endswith("/v1"):
                 self._chat_url = base_url.rstrip("/") + "/chat/completions"
+                self._batch_url = base_url.rstrip("/") + "/batch"
             else:
                 self._chat_url = base_url
+                self._batch_url = None
             self._api_key = api_key or os.environ.get("OPENAI_API_KEY", "not-needed")
         else:
             self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
             self._anthropic_client = anthropic.Anthropic(api_key=self.api_key)
 
         logger.info("LLMClient initialized: provider=%s model=%s base_url=%s", provider, self.model, base_url)
-
-    def warmup(self, timeout: float = 600.0, interval: float = 10.0) -> bool:
-        """Send a minimal request to warm up the endpoint.
-
-        Retries until the endpoint responds or timeout is reached.
-        Modal cold starts can take 3-5 minutes (container boot + model load).
-        No-op for Anthropic (always available). Returns True if ready.
-        """
-        if self.provider != "openai":
-            return True
-
-        import time
-
-        start = time.monotonic()
-        attempt = 0
-        while True:
-            attempt += 1
-            try:
-                resp = self._http.post(
-                    self._chat_url,
-                    json={
-                        "model": self.model,
-                        "messages": [{"role": "user", "content": "ping"}],
-                        "max_tokens": 1,
-                    },
-                    headers={
-                        "Content-Type": "application/json",
-                        "Authorization": f"Bearer {self._api_key}",
-                    },
-                    timeout=120.0,
-                )
-                resp.raise_for_status()
-                elapsed = time.monotonic() - start
-                logger.info("LLM endpoint warm after %d attempts (%.1fs)", attempt, elapsed)
-                return True
-            except Exception as e:
-                elapsed = time.monotonic() - start
-                if elapsed + interval >= timeout:
-                    logger.error("LLM endpoint not ready after %d attempts (%.0fs): %s", attempt, elapsed, e)
-                    return False
-                logger.info("Warmup attempt %d (%.0fs elapsed): %s", attempt, elapsed, e)
-                time.sleep(interval)
 
     def chat(
         self,
@@ -179,6 +139,82 @@ class LLMClient:
             text=choice["message"]["content"] or "",
             stop_reason=choice.get("finish_reason"),
         )
+
+    def batch_chat(self, requests: list[dict]) -> list[LLMResponse]:
+        """Send multiple chat completions in a single HTTP call.
+
+        Each request: {messages: [...], max_tokens: int, system: str|None}
+        Returns list of LLMResponse, one per input, preserving order.
+        Falls back to serial chat() calls for non-OpenAI providers.
+        """
+        if self.provider != "openai" or not getattr(self, "_batch_url", None):
+            return self._batch_chat_serial(requests)
+
+        # Build OpenAI-format request payloads
+        batch_payloads = []
+        for req in requests:
+            oai_messages = []
+            if req.get("system"):
+                oai_messages.append({"role": "system", "content": req["system"]})
+            for msg in req["messages"]:
+                content = msg.get("content", "")
+                if isinstance(content, list):
+                    text_parts = [
+                        b["text"] for b in content
+                        if isinstance(b, dict) and b.get("type") == "text"
+                    ]
+                    content = "\n".join(text_parts)
+                oai_messages.append({"role": msg["role"], "content": content})
+            batch_payloads.append({
+                "model": self.model,
+                "messages": oai_messages,
+                "max_tokens": req.get("max_tokens", 4096),
+            })
+
+        logger.info("Sending batch of %d requests to %s", len(batch_payloads), self._batch_url)
+        resp = self._http.post(
+            self._batch_url,
+            json={"requests": batch_payloads},
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self._api_key}",
+            },
+            timeout=600.0,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        results = []
+        for r in data["responses"]:
+            if "error" in r:
+                logger.warning("Batch item error: %s", r["error"])
+                results.append(LLMResponse(text=f"Error: {r['error']}", stop_reason="error"))
+            else:
+                choice = r["choices"][0]
+                results.append(LLMResponse(
+                    text=choice["message"]["content"] or "",
+                    stop_reason=choice.get("finish_reason"),
+                ))
+
+        logger.info("Batch complete: %d responses", len(results))
+        return results
+
+    def _batch_chat_serial(self, requests: list[dict]) -> list[LLMResponse]:
+        """Fallback: run requests serially via chat()."""
+        results = []
+        for req in requests:
+            resp = self.chat(
+                req["messages"],
+                system=req.get("system"),
+                max_tokens=req.get("max_tokens", 4096),
+            )
+            if isinstance(resp, LLMResponse):
+                results.append(resp)
+            else:
+                # Anthropic Message → LLMResponse
+                text = resp.content[0].text if resp.content else ""
+                results.append(LLMResponse(text=text, stop_reason=resp.stop_reason))
+        return results
 
     def chat_stream(
         self,
