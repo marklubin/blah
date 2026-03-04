@@ -11,6 +11,7 @@ import httpx
 
 from blah.adapters.base import PlatformAdapter
 from blah.config.settings import BlahSettings
+from blah.llm.client import LLMClient
 from blah.memory.file_provider import FileMemoryProvider
 from blah.db.repository import (
     FeedItemRepo,
@@ -106,6 +107,9 @@ class RadarPipeline:
             PipelineResult with stats from each stage
         """
         result = PipelineResult()
+
+        # 0. Warm up LLM endpoints (Modal cold start can take 60-90s)
+        self._warmup_endpoints()
 
         # 1. Poll sources for new items
         if not skip_poll:
@@ -285,6 +289,24 @@ class RadarPipeline:
             )
         except Exception:
             logger.warning("Failed to push notification: %s", title, exc_info=True)
+
+    def _warmup_endpoints(self) -> None:
+        """Warm up unique LLM endpoints before pipeline stages."""
+        seen: set[str] = set()
+        for model_cfg in [self._settings.models.triage, self._settings.models.research]:
+            if model_cfg.provider != "openai" or not model_cfg.base_url:
+                continue
+            if model_cfg.base_url in seen:
+                continue
+            seen.add(model_cfg.base_url)
+            logger.info("Warming up LLM endpoint: %s", model_cfg.base_url)
+            client = LLMClient(
+                provider=model_cfg.provider,
+                model=model_cfg.model,
+                base_url=model_cfg.base_url,
+            )
+            if not client.warmup():
+                logger.warning("LLM endpoint did not warm up in time — continuing anyway")
 
     def _generate_report(self, sources_polled: list[str]) -> dict:
         """Generate a report from researched items."""

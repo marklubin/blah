@@ -77,6 +77,47 @@ class LLMClient:
 
         logger.info("LLMClient initialized: provider=%s model=%s base_url=%s", provider, self.model, base_url)
 
+    def warmup(self, timeout: float = 300.0, interval: float = 5.0) -> bool:
+        """Send a minimal request to warm up the endpoint.
+
+        Retries until the endpoint responds or timeout is reached.
+        No-op for Anthropic (always available). Returns True if ready.
+        """
+        if self.provider != "openai":
+            return True
+
+        import time
+
+        start = time.monotonic()
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                resp = self._http.post(
+                    self._chat_url,
+                    json={
+                        "model": self.model,
+                        "messages": [{"role": "user", "content": "ping"}],
+                        "max_tokens": 1,
+                    },
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {self._api_key}",
+                    },
+                    timeout=60.0,
+                )
+                resp.raise_for_status()
+                elapsed = time.monotonic() - start
+                logger.info("LLM endpoint warm after %d attempts (%.1fs)", attempt, elapsed)
+                return True
+            except Exception as e:
+                elapsed = time.monotonic() - start
+                if elapsed + interval >= timeout:
+                    logger.error("LLM endpoint not ready after %d attempts (%.0fs): %s", attempt, elapsed, e)
+                    return False
+                logger.info("Warmup attempt %d (%.0fs elapsed): %s", attempt, elapsed, e)
+                time.sleep(interval)
+
     def chat(
         self,
         messages: list[dict],
