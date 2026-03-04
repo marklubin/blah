@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
 from blah.config.settings import BlahSettings
@@ -44,16 +46,24 @@ class TriageService:
         self._memory = memory
         self._feed_repo = FeedItemRepo(db)
 
-        # Use provided client or create one with triage model
+        # Store config for creating per-thread LLM clients
         if llm_client:
             self._llm = llm_client
+            self._llm_config = {
+                "provider": llm_client.provider,
+                "model": llm_client.model,
+                "base_url": llm_client.base_url,
+            }
         else:
             model_config = settings.models.triage
-            self._llm = LLMClient(
-                provider=model_config.provider,
-                model=model_config.model,
-                base_url=model_config.base_url,
-            )
+            self._llm_config = {
+                "provider": model_config.provider,
+                "model": model_config.model,
+                "base_url": model_config.base_url,
+            }
+            self._llm = LLMClient(**self._llm_config)
+
+        self._thread_local = threading.local()
 
     def triage_raw_items(self, limit: int = 1000) -> TriageResult:
         """Triage all raw items, updating their status."""
@@ -70,48 +80,67 @@ class TriageService:
         return self._triage_batch(items, context)
 
     def _triage_batch(self, items: list[dict], context: str) -> TriageResult:
-        """Score a batch of items and update their status."""
+        """Score batches of items concurrently and update their status."""
         passed = []
         discarded = []
+        max_workers = self._settings.concurrency.triage_workers
 
-        # Process in batches
-        for i in range(0, len(items), BATCH_SIZE):
-            batch = items[i : i + BATCH_SIZE]
-            scores = self._score_batch(batch, context)
+        batches = [items[i : i + BATCH_SIZE] for i in range(0, len(items), BATCH_SIZE)]
 
-            for item, (score, reason) in zip(batch, scores, strict=False):
-                if score >= TRIAGE_THRESHOLD:
-                    self._feed_repo.update(
-                        item["id"],
-                        status="triaged",
-                        relevance_score=score,
-                        triage_reason=reason,
-                    )
-                    item["relevance_score"] = score
-                    item["triage_reason"] = reason
-                    passed.append(item)
-                    logger.debug(
-                        "Item %s passed triage: %.2f - %s",
-                        item["id"][:8], score, reason[:50],
-                    )
-                else:
-                    self._feed_repo.update(
-                        item["id"],
-                        status="discarded",
-                        relevance_score=score,
-                        triage_reason=reason,
-                    )
-                    discarded.append(item)
-                    logger.debug(
-                        "Item %s discarded: %.2f - %s",
-                        item["id"][:8], score, reason[:50],
-                    )
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            future_to_batch = {
+                pool.submit(self._score_batch, batch, context): batch
+                for batch in batches
+            }
+            for future in as_completed(future_to_batch):
+                batch = future_to_batch[future]
+                try:
+                    scores = future.result()
+
+                    # DB writes on main thread (serialized)
+                    for item, (score, reason) in zip(batch, scores, strict=False):
+                        if score >= TRIAGE_THRESHOLD:
+                            self._feed_repo.update(
+                                item["id"],
+                                status="triaged",
+                                relevance_score=score,
+                                triage_reason=reason,
+                            )
+                            item["relevance_score"] = score
+                            item["triage_reason"] = reason
+                            passed.append(item)
+                            logger.debug(
+                                "Item %s passed triage: %.2f - %s",
+                                item["id"][:8], score, reason[:50],
+                            )
+                        else:
+                            self._feed_repo.update(
+                                item["id"],
+                                status="discarded",
+                                relevance_score=score,
+                                triage_reason=reason,
+                            )
+                            discarded.append(item)
+                            logger.debug(
+                                "Item %s discarded: %.2f - %s",
+                                item["id"][:8], score, reason[:50],
+                            )
+                except Exception as e:
+                    logger.exception("Batch scoring failed: %s", e)
+                    for item in batch:
+                        discarded.append(item)
 
         logger.info(
             "Triage complete: %d passed, %d discarded",
             len(passed), len(discarded),
         )
         return TriageResult(passed=passed, discarded=discarded, total=len(items))
+
+    def _get_thread_llm(self) -> LLMClient:
+        """Get a per-thread LLM client to avoid connection pool contention."""
+        if not hasattr(self._thread_local, "llm"):
+            self._thread_local.llm = LLMClient(**self._llm_config)
+        return self._thread_local.llm
 
     def _score_batch(
         self, items: list[dict], context: str
@@ -157,7 +186,8 @@ Return a JSON array with one object per item:
 Return ONLY the JSON array, no other text."""
 
         try:
-            response = self._llm.chat(
+            llm = self._get_thread_llm()
+            response = llm.chat(
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=2000,
             )

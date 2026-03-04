@@ -64,6 +64,13 @@ class ModelsConfig(BaseModel):
     conversation: ModelConfig = Field(default_factory=ModelConfig)
 
 
+class ConcurrencyConfig(BaseModel):
+    """Worker pool sizes for concurrent pipeline stages."""
+
+    research_workers: int = 5
+    triage_workers: int = 3
+
+
 class QueueConfig(BaseModel):
     """Configuration for the Cloudflare suggestion queue (KV-backed)."""
 
@@ -88,6 +95,7 @@ class BlahSettings(BaseSettings):
     blah_home: Path = Field(default_factory=get_blah_home)
     models: ModelsConfig = Field(default_factory=ModelsConfig)
     context: ContextConfig = Field(default_factory=ContextConfig)
+    concurrency: ConcurrencyConfig = Field(default_factory=ConcurrencyConfig)
     queue: QueueConfig = Field(default_factory=QueueConfig)
     platforms: dict[str, PlatformCredentials] = Field(default_factory=dict)
 

@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
 from blah.adapters.base import PlatformAdapter
@@ -61,16 +63,24 @@ class ResearchService:
         self._memory = memory
         self._feed_repo = FeedItemRepo(db)
 
-        # Use provided client or create one with research model
+        # Store config for creating per-thread LLM clients
         if llm_client:
             self._llm = llm_client
+            self._llm_config = {
+                "provider": llm_client.provider,
+                "model": llm_client.model,
+                "base_url": llm_client.base_url,
+            }
         else:
             model_config = settings.models.research
-            self._llm = LLMClient(
-                provider=model_config.provider,
-                model=model_config.model,
-                base_url=model_config.base_url,
-            )
+            self._llm_config = {
+                "provider": model_config.provider,
+                "model": model_config.model,
+                "base_url": model_config.base_url,
+            }
+            self._llm = LLMClient(**self._llm_config)
+
+        self._thread_local = threading.local()
 
     def research_triaged_items(self, limit: int = 200) -> ResearchResult:
         """Research all triaged items, updating their enrichment."""
@@ -92,32 +102,39 @@ class ResearchService:
             return None
 
     def _research_items(self, items: list[dict], context: str) -> ResearchResult:
-        """Research a list of items."""
+        """Research a list of items concurrently."""
         researched = []
         failed = []
+        max_workers = self._settings.concurrency.research_workers
 
-        for item in items:
-            try:
-                enrichment = self._enrich_item(item, context)
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            future_to_item = {
+                pool.submit(self._enrich_item, item, context): item
+                for item in items
+            }
+            for future in as_completed(future_to_item):
+                item = future_to_item[future]
+                try:
+                    enrichment = future.result()
 
-                # Update the item in the database
-                self._feed_repo.update(
-                    item["id"],
-                    status="researched",
-                    enrichment=enrichment.to_dict(),
-                )
+                    # DB write on main thread (serialized)
+                    self._feed_repo.update(
+                        item["id"],
+                        status="researched",
+                        enrichment=enrichment.to_dict(),
+                    )
 
-                item["enrichment"] = enrichment.to_dict()
-                researched.append(item)
-                logger.info(
-                    "Researched item %s: %d angles suggested",
-                    item["id"][:8],
-                    len(enrichment.suggested_angles),
-                )
+                    item["enrichment"] = enrichment.to_dict()
+                    researched.append(item)
+                    logger.info(
+                        "Researched item %s: %d angles suggested",
+                        item["id"][:8],
+                        len(enrichment.suggested_angles),
+                    )
 
-            except Exception as e:
-                logger.exception("Failed to research item %s: %s", item["id"], e)
-                failed.append(item)
+                except Exception as e:
+                    logger.exception("Failed to research item %s: %s", item["id"], e)
+                    failed.append(item)
 
         logger.info(
             "Research complete: %d researched, %d failed",
@@ -167,6 +184,12 @@ class ResearchService:
 
         return enrichment
 
+    def _get_thread_llm(self) -> LLMClient:
+        """Get a per-thread LLM client to avoid connection pool contention."""
+        if not hasattr(self._thread_local, "llm"):
+            self._thread_local.llm = LLMClient(**self._llm_config)
+        return self._thread_local.llm
+
     def _generate_angles(
         self, item: dict, enrichment: Enrichment, context: str
     ) -> dict:
@@ -208,7 +231,8 @@ Return JSON:
 Return ONLY the JSON, no other text."""
 
         try:
-            response = self._llm.chat(
+            llm = self._get_thread_llm()
+            response = llm.chat(
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=1000,
             )
