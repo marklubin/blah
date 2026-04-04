@@ -1,0 +1,1 @@
+/home/mark/claude-sync/build/project-contexts/blah.md
